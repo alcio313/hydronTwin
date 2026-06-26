@@ -1,0 +1,109 @@
+# HydRON Digital Twin Config file
+# Physically consistent demonstration parameters
+
+[constellation]
+name = "HydRON-Like-Net"
+
+[constellation.leo]
+num_satellites = 10
+altitude_km = 550.0
+inclination_deg = 97.6
+mass_kg = 20.0
+cross_section_area_m2 = 0.1
+cd = 2.2
+cr = 1.2
+
+[constellation.meo]
+num_satellites = 4
+altitude_km = 10000.0
+inclination_deg = 55.0
+raans_deg = [0.0, 90.0, 180.0, 270.0]
+mass_kg = 50.0
+cross_section_area_m2 = 0.25
+cd = 0.0
+cr = 1.2
+
+[constellation.geo]
+num_satellites = 3
+longitudes_deg = [0.0, 60.0, -120.0]
+altitude_km = 35786.0
+inclination_deg = 0.0
+mass_kg = 200.0
+cross_section_area_m2 = 1.5
+cd = 0.0
+cr = 1.2
+
+[ground]
+# Ground Segment configuration
+# 4 stations with location and capacity
+
+[[ground.stations]]
+id = "GS_ROM"
+name = "Rome"
+lat_deg = 41.9028
+lon_deg = 12.4964
+alt_m = 50.0
+downlink_nominal_gbps = 10.0
+
+[[ground.stations]]
+id = "GS_SVA"
+name = "Svalbard"
+lat_deg = 78.2307
+lon_deg = 15.6472
+alt_m = 130.0
+downlink_nominal_gbps = 10.0
+
+[[ground.stations]]
+id = "GS_MAU"
+name = "Maui"
+lat_deg = 20.7082
+lon_deg = -156.2568
+alt_m = 3055.0
+downlink_nominal_gbps = 10.0
+
+[[ground.stations]]
+id = "GS_REU"
+name = "Reunion"
+lat_deg = -21.1151
+lon_deg = 55.5364
+alt_m = 80.0
+downlink_nominal_gbps = 10.0
+
+[atmosphere]
+states = ["clear", "thin_clouds", "thick_clouds", "heavy"]
+k_values_per_km = [0.05, 0.2, 1.5, 5.0]
+# Transition matrix for 60s timestep
+# Order: clear, thin_clouds, thick_clouds, heavy
+transition_matrix = [
+    [0.85, 0.10, 0.04, 0.01],
+    [0.15, 0.70, 0.10, 0.05],
+    [0.05, 0.15, 0.65, 0.15],
+    [0.02, 0.08, 0.20, 0.70]
+]
+
+[adcs]
+rw_max_torque_nm = 0.01
+rw_max_momentum_nms = 0.1
+mtq_max_dipole_am2 = 0.2
+
+[sensors]
+gyro_bias_rad_s = [1e-5, 1e-5, 1e-5]
+gyro_noise_rad_s = 1e-6
+mag_noise_tesla = 1e-8
+sun_noise_rad = 1e-3
+star_tracker_noise_rad = 1e-4
+
+[environment]
+mu = 3.986004418e14
+r_earth = 6378137.0
+j2 = 1.08262668e-3
+rho0_500km = 3.8e-12
+h0_km = 500.0
+scale_height_km = 70.0
+p_srp = 4.56e-6
+
+[digital_twin]
+time_step_s = 1.0
+sim_duration_s = 86400.0
+ref_distance_isl_km = 1000.0
+ref_distance_sgl_km = 1000.0
