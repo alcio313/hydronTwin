@@ -38,14 +38,6 @@ cr = 1.2
 # 4 stations with location and capacity
 
 [[ground.stations]]
-id = "GS_ROM"
-name = "Rome"
-lat_deg = 41.9028
-lon_deg = 12.4964
-alt_m = 50.0
-downlink_nominal_gbps = 10.0
-
-[[ground.stations]]
 id = "GS_SVA"
 name = "Svalbard"
 lat_deg = 78.2307
@@ -54,11 +46,11 @@ alt_m = 130.0
 downlink_nominal_gbps = 10.0
 
 [[ground.stations]]
-id = "GS_MAU"
-name = "Maui"
-lat_deg = 20.7082
-lon_deg = -156.2568
-alt_m = 3055.0
+id = "GS_ZRH"
+name = "Zurich"
+lat_deg = 47.4647
+lon_deg = 8.5492
+alt_m = 400.0
 downlink_nominal_gbps = 10.0
 
 [[ground.stations]]
