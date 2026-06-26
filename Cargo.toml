@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 eframe = "0.27"
+image = { version = "0.24", default-features = false, features = ["jpeg"] }

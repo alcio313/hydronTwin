@@ -56,9 +56,9 @@ downlink_nominal_gbps = 10.0
 [[ground.stations]]
 id = "GS_REU"
 name = "Reunion"
-lat_deg = -21.1151
-lon_deg = 55.5364
-alt_m = 80.0
+lat_deg = -20.9089
+lon_deg = 55.5136
+alt_m = 95.0
 downlink_nominal_gbps = 10.0
 
 [atmosphere]

@@ -921,7 +921,7 @@ pub struct HydronGuiApp {
     // Control parameters
     is_running: bool,
     current_time: f64,
-    time_warp: usize,
+    time_warp: i32,
     step_size: f64,
 
     // Selection
@@ -975,6 +975,8 @@ pub struct HydronGuiApp {
     map_pitch: f32,
     map_yaw: f32,
     map_zoom: f32,
+
+    earth_texture: Option<egui::TextureHandle>,
 }
 
 impl HydronGuiApp {
@@ -1053,7 +1055,29 @@ impl HydronGuiApp {
             map_pitch: 0.4,
             map_yaw: 0.6,
             map_zoom: 1.0,
+            earth_texture: None, // Will load below
         };
+
+        // Load Earth texture map
+        if let Ok(img_data) = std::fs::read("earth.jpg") {
+            if let Ok(img) = image::load_from_memory_with_format(&img_data, image::ImageFormat::Jpeg) {
+                let rgba = img.to_rgba8();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width() as usize, img.height() as usize],
+                    rgba.as_raw(),
+                );
+                app.earth_texture = Some(cc.egui_ctx.load_texture(
+                    "earth-texture",
+                    color_image,
+                    egui::TextureOptions::default(),
+                ));
+                app.log("Loaded Earth surface texture successfully.");
+            } else {
+                app.log("Warning: earth.jpg could not be decoded as JPEG.");
+            }
+        } else {
+            app.log("Warning: earth.jpg texture file not found in directory.");
+        }
         app.update_input_fields_for_selected();
         app
     }
@@ -1250,11 +1274,22 @@ impl eframe::App for HydronGuiApp {
         // Run continuous animation/repaint loop
         ctx.request_repaint();
 
+        let mut pending_remove = None;
+        let mut pending_add = false;
+        let mut pending_reset = false;
+
         // 1. Core simulation physics steps
         if self.is_running {
             let mut pending_logs = Vec::new();
-            for _ in 0..self.time_warp {
-                self.current_time += self.step_size;
+            let loops = self.time_warp.abs();
+            let dt = if self.time_warp < 0 { -self.step_size } else { self.step_size };
+
+            for _ in 0..loops {
+                if self.current_time + dt < 0.0 {
+                    self.current_time = 0.0;
+                    break;
+                }
+                self.current_time += dt;
                 let sun_vector = [1.0, 0.0, 0.0];
                 let b_eci_mock = [1e-5, 2e-5, -3e-5];
 
@@ -1289,8 +1324,8 @@ impl eframe::App for HydronGuiApp {
                             pending_logs.push(format!("Injected attitude disturbance into satellite {}", sat.id));
                         }
 
-                        step_orbit(sat, self.step_size, &self.config.env, sun_vector);
-                        step_attitude(sat, self.step_size, b_eci_mock, rw_torque, mtq_dipole);
+                        step_orbit(sat, dt, &self.config.env, sun_vector);
+                        step_attitude(sat, dt, b_eci_mock, rw_torque, mtq_dipole);
                     }
                 }
             }
@@ -1416,15 +1451,7 @@ impl eframe::App for HydronGuiApp {
                 }
 
                 if ui.button("↺ Reset").clicked() {
-                    self.current_time = 0.0;
-                    self.constellation = create_satellites_from_config(&self.config);
-                    self.ground_stations = self.config.stations.clone();
-                    self.weather_overrides = vec![Some(0); self.ground_stations.len()];
-                    self.history_time.clear();
-                    self.history_total.clear();
-                    self.history_stations = vec![Vec::new(); self.ground_stations.len()];
-                    self.map_zoom = 1.0;
-                    self.log("Simulation State Reset to initial values");
+                    pending_reset = true;
                 }
 
                 if ui.button("📥 Esporta 24h CSV").clicked() {
@@ -1440,7 +1467,7 @@ impl eframe::App for HydronGuiApp {
 
                 ui.separator();
                 ui.label("Time Warp:");
-                ui.add(egui::Slider::new(&mut self.time_warp, 1..=50).text("x"));
+                ui.add(egui::Slider::new(&mut self.time_warp, -50..=50).text("x"));
 
                 ui.separator();
                 ui.label(format!("Epoch: {:.1}s", self.current_time));
@@ -1574,34 +1601,12 @@ impl eframe::App for HydronGuiApp {
                         }
 
                         if let Some(idx) = to_remove {
-                            let name = self.ground_stations[idx].name.clone();
-                            self.ground_stations.remove(idx);
-                            if idx < self.weather_overrides.len() {
-                                self.weather_overrides.remove(idx);
-                            }
-                            if idx < self.history_stations.len() {
-                                self.history_stations.remove(idx);
-                            }
-                            self.log(&format!("Rimossa stazione {}", name));
+                            pending_remove = Some(idx);
                         }
 
                         ui.add_space(4.0);
                         if ui.button("➕ Aggiungi Stazione").clicked() {
-                            let new_id = format!("GS_{}", self.ground_stations.len() + 1);
-                            let new_name = format!("Station {}", self.ground_stations.len() + 1);
-                            self.ground_stations.push(GroundStation {
-                                id: new_id.clone(),
-                                name: new_name.clone(),
-                                lat_rad: 0.0,
-                                lon_rad: 0.0,
-                                alt_m: 100.0,
-                                downlink_nominal_gbps: 10.0,
-                                atmos_state: 0,
-                                k_value: self.config.atmos_k[0] / 1000.0,
-                            });
-                            self.weather_overrides.push(Some(0));
-                            self.history_stations.push(vec![0.0f32; self.history_time.len()]);
-                            self.log(&format!("Aggiunta stazione {}", new_name));
+                            pending_add = true;
                         }
                     });
                 }); // 📡 Modifica Costellazione outer collapsing
@@ -1969,7 +1974,7 @@ impl eframe::App for HydronGuiApp {
             // 3D projection closure: projects [x, y, z] to screen space and returns (pos2, rotated_z)
             let project_3d = |pos: [f64; 3]| -> (egui::Pos2, f64) {
                 let x = pos[0];
-                let y = pos[1];
+                let y = -pos[1]; // Invert Y to correct longitude coordinate system orientation
                 let z = pos[2];
 
                 // 1. Rotate around Y-axis by map_yaw
@@ -1993,9 +1998,71 @@ impl eframe::App for HydronGuiApp {
                 (egui::pos2(screen_x, screen_y), z2)
             };
 
-            // Draw Earth
-            let earth_radius_px = (self.config.env.r_earth * scale) as f32;
-            painter.circle_filled(center, earth_radius_px, egui::Color32::from_rgb(15, 76, 129)); // Blue surface
+            // Draw Earth (textured 3D sphere mesh, or fallback to solid blue circle)
+            let r_earth = self.config.env.r_earth;
+            let earth_radius_px = (r_earth * scale) as f32;
+            if let Some(ref texture) = self.earth_texture {
+                let n_lat = 32;
+                let n_lon = 64;
+                let mut projected_vertices = vec![vec![(egui::pos2(0.0, 0.0), 0.0); n_lon + 1]; n_lat + 1];
+                for i in 0..=n_lat {
+                    let lat_rad = -std::f64::consts::FRAC_PI_2 + (i as f64) * std::f64::consts::PI / (n_lat as f64);
+                    let z = r_earth * lat_rad.sin();
+                    let r_lat = r_earth * lat_rad.cos();
+                    
+                    for j in 0..=n_lon {
+                        let lon_rad = (j as f64) * 2.0 * std::f64::consts::PI / (n_lon as f64) + gst + 180.0_f64.to_radians();
+                        let x = r_lat * lon_rad.cos();
+                        let y = r_lat * lon_rad.sin();
+                        
+                        projected_vertices[i][j] = project_3d([x, y, z]);
+                    }
+                }
+
+                let mut mesh = egui::Mesh::with_texture(texture.id());
+                let mut vertex_indices = vec![vec![u32::MAX; n_lon + 1]; n_lat + 1];
+
+                for i in 0..n_lat {
+                    for j in 0..n_lon {
+                        let p00 = projected_vertices[i][j];
+                        let p10 = projected_vertices[i+1][j];
+                        let p01 = projected_vertices[i][j+1];
+                        let p11 = projected_vertices[i+1][j+1];
+
+                        let avg_z = (p00.1 + p10.1 + p01.1 + p11.1) / 4.0;
+                        if avg_z > 0.0 {
+                            let mut add_vertex = |row: usize, col: usize, mesh: &mut egui::Mesh| -> u32 {
+                                if vertex_indices[row][col] == u32::MAX {
+                                    let (pos, _) = projected_vertices[row][col];
+                                    let u = col as f32 / n_lon as f32;
+                                    let v = 1.0 - (row as f32 / n_lat as f32);
+                                    let idx = mesh.vertices.len() as u32;
+                                    mesh.vertices.push(egui::epaint::Vertex {
+                                        pos,
+                                        uv: egui::pos2(u, v),
+                                        color: egui::Color32::WHITE,
+                                    });
+                                    vertex_indices[row][col] = idx;
+                                    idx
+                                } else {
+                                    vertex_indices[row][col]
+                                }
+                            };
+
+                            let idx00 = add_vertex(i, j, &mut mesh);
+                            let idx10 = add_vertex(i + 1, j, &mut mesh);
+                            let idx01 = add_vertex(i, j + 1, &mut mesh);
+                            let idx11 = add_vertex(i + 1, j + 1, &mut mesh);
+
+                            mesh.add_triangle(idx00, idx10, idx01);
+                            mesh.add_triangle(idx10, idx11, idx01);
+                        }
+                    }
+                }
+                painter.add(mesh);
+            } else {
+                painter.circle_filled(center, earth_radius_px, egui::Color32::from_rgb(15, 76, 129));
+            }
             painter.circle_stroke(center, earth_radius_px, egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)));
 
             // Draw Earth's yellow latitude/longitude grid
@@ -2362,6 +2429,50 @@ impl eframe::App for HydronGuiApp {
                 }
             }
         });
+
+        // Apply deferred mutations to avoid index mismatches during UI drawing
+        if let Some(idx) = pending_remove {
+            let name = self.ground_stations[idx].name.clone();
+            self.ground_stations.remove(idx);
+            if idx < self.weather_overrides.len() {
+                self.weather_overrides.remove(idx);
+            }
+            if idx < self.history_stations.len() {
+                self.history_stations.remove(idx);
+            }
+            self.log(&format!("Rimossa stazione {}", name));
+        }
+        if pending_add {
+            let new_id = format!("GS_{}", self.ground_stations.len() + 1);
+            let new_name = format!("Station {}", self.ground_stations.len() + 1);
+            self.ground_stations.push(GroundStation {
+                id: new_id.clone(),
+                name: new_name.clone(),
+                lat_rad: 0.0,
+                lon_rad: 0.0,
+                alt_m: 100.0,
+                downlink_nominal_gbps: 10.0,
+                atmos_state: 0,
+                k_value: self.config.atmos_k[0] / 1000.0,
+            });
+            self.weather_overrides.push(Some(0));
+            self.history_stations.push(vec![0.0f32; self.history_time.len()]);
+            self.log(&format!("Aggiunta stazione {}", new_name));
+        }
+        if pending_reset {
+            self.current_time = 0.0;
+            self.is_running = true;
+            self.time_warp = 1;
+            self.selected_satellite_id = "LEO_00".to_string();
+            self.constellation = create_satellites_from_config(&self.config);
+            self.ground_stations = self.config.stations.clone();
+            self.weather_overrides = vec![Some(0); self.ground_stations.len()];
+            self.history_time.clear();
+            self.history_stations = vec![Vec::new(); self.ground_stations.len()];
+            self.history_total.clear();
+            self.map_zoom = 1.0;
+            self.log("Simulation State Reset to initial values");
+        }
     }
 }
 
@@ -2401,7 +2512,7 @@ fn main() -> Result<(), eframe::Error> {
                 stations: vec![
                     GroundStation { id: "GS_SVA".to_string(), name: "Svalbard".to_string(), lat_rad: 78.2307f64.to_radians(), lon_rad: 15.6472f64.to_radians(), alt_m: 130.0, downlink_nominal_gbps: 10.0, atmos_state: 0, k_value: 0.05 / 1000.0 },
                     GroundStation { id: "GS_ZRH".to_string(), name: "Zurich".to_string(), lat_rad: 47.4647f64.to_radians(), lon_rad:  8.5492f64.to_radians(), alt_m: 400.0, downlink_nominal_gbps: 10.0, atmos_state: 0, k_value: 0.05 / 1000.0 },
-                    GroundStation { id: "GS_REU".to_string(), name: "Reunion".to_string(), lat_rad: -21.1151f64.to_radians(), lon_rad: 55.5364f64.to_radians(), alt_m: 80.0, downlink_nominal_gbps: 10.0, atmos_state: 0, k_value: 0.05 / 1000.0 },
+                    GroundStation { id: "GS_REU".to_string(), name: "Reunion".to_string(), lat_rad: -20.9089f64.to_radians(), lon_rad: 55.5136f64.to_radians(), alt_m: 95.0, downlink_nominal_gbps: 10.0, atmos_state: 0, k_value: 0.05 / 1000.0 },
                 ],
                 atmos_states: vec!["clear".to_string(), "thin".to_string(), "thick".to_string(), "heavy".to_string()],
                 atmos_k: vec![0.05, 0.2, 1.5, 5.0],
