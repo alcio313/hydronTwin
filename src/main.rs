@@ -864,11 +864,25 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
     let mut geo_sats = Vec::new();
     let r_geo = r_earth + config.geo_alt_km * 1000.0;
     let v_geo_mag = (config.env.mu / r_geo).sqrt();
+    let inc_geo = config.geo_inc_deg.to_radians();
 
     for i in 0..config.geo_num {
         let lon_rad = (i as f64) * 2.0 * std::f64::consts::PI / (config.geo_num as f64);
-        let r_eci = [r_geo * lon_rad.cos(), r_geo * lon_rad.sin(), 0.0];
-        let v_eci = [-v_geo_mag * lon_rad.sin(), v_geo_mag * lon_rad.cos(), 0.0];
+        let r_plane = [r_geo * lon_rad.cos(), r_geo * lon_rad.sin(), 0.0];
+        let v_plane = [-v_geo_mag * lon_rad.sin(), v_geo_mag * lon_rad.cos(), 0.0];
+
+        let c_i = inc_geo.cos();
+        let s_i = inc_geo.sin();
+        let r_eci = [
+            r_plane[0],
+            r_plane[1] * c_i,
+            r_plane[1] * s_i
+        ];
+        let v_eci = [
+            v_plane[0],
+            v_plane[1] * c_i,
+            v_plane[1] * s_i
+        ];
 
         geo_sats.push(Satellite {
             id: format!("GEO_{:02}", i),
@@ -947,6 +961,7 @@ pub struct HydronGuiApp {
     show_meo: bool,
     show_geo: bool,
     show_sgl: bool,
+    show_left_panel: bool,
 
     // Log list
     logs: Vec<String>,
@@ -1008,6 +1023,7 @@ impl HydronGuiApp {
             show_meo: true,
             show_geo: true,
             show_sgl: true,
+            show_left_panel: true,
             
             logs: vec!["System Digital Twin Initialized.".to_string()],
             
@@ -1206,6 +1222,12 @@ impl eframe::App for HydronGuiApp {
         // 2. GUI panels layout
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                let btn_text = if self.show_left_panel { "⏴ Stazioni" } else { "⏵ Stazioni" };
+                if ui.button(btn_text).clicked() {
+                    self.show_left_panel = !self.show_left_panel;
+                }
+                ui.separator();
+
                 ui.heading("🛰 HydRON Digital Twin");
                 ui.separator();
 
@@ -1251,7 +1273,8 @@ impl eframe::App for HydronGuiApp {
             }); // horizontal
         }); // top_panel
 
-        egui::SidePanel::left("left_panel").width_range(290.0..=340.0).show(ctx, |ui| {
+        if self.show_left_panel {
+            egui::SidePanel::left("left_panel").width_range(290.0..=340.0).show(ctx, |ui| {
                 ui.separator();
                 ui.collapsing("⚙ Filtri Visualizzazione", |ui| {
                     ui.checkbox(&mut self.show_leo, "LEO ISL");
@@ -1339,15 +1362,15 @@ impl eframe::App for HydronGuiApp {
                         }
                     }); // Atmosfera Stazioni
                 }); // 📡 Modifica Costellazione outer collapsing
-                ui.heading("🛰 Stazioni di Terra");
-            ui.separator();
 
-            egui::ScrollArea::vertical().id_source("gs_scroll").show(ui, |ui| {
-                for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
-                    let weather_name = &self.atmos_model.states[gs.atmos_state];
- 
-                    let (wx_icon, wx_color) = match gs.atmos_state {
-                        0 => ("☀", egui::Color32::from_rgb(34, 197, 94)),
+                ui.separator();
+                ui.collapsing("🛰 Stazioni di Terra", |ui| {
+                    egui::ScrollArea::vertical().id_source("gs_scroll").show(ui, |ui| {
+                        for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
+                            let weather_name = &self.atmos_model.states[gs.atmos_state];
+                            
+                            let (wx_icon, wx_color) = match gs.atmos_state {
+                                0 => ("☀", egui::Color32::from_rgb(34, 197, 94)),
                         1 => ("🌤", egui::Color32::from_rgb(234, 179, 8)),
                         2 => ("☁", egui::Color32::from_rgb(156, 163, 175)),
                         _ => ("🌧", egui::Color32::from_rgb(239, 68, 68)),
@@ -1437,7 +1460,9 @@ impl eframe::App for HydronGuiApp {
                     ui.add_space(3.0);
                 } // end for gs
             }); // ScrollArea
-        }); // left_panel
+                }); // Collapsing Stazioni di Terra
+            }); // left_panel
+        }
 
         egui::SidePanel::right("right_panel").width_range(280.0..=330.0).show(ctx, |ui| {
             ui.heading("Pannello Satelliti");
@@ -1689,6 +1714,32 @@ impl eframe::App for HydronGuiApp {
             painter.circle_filled(center, earth_radius_px, egui::Color32::from_rgb(15, 23, 42));
             painter.circle_stroke(center, earth_radius_px, egui::Stroke::new(2.0, egui::Color32::from_rgb(34, 197, 94)));
 
+            // Draw Earth's rotation axis (North-South Pole axis representation)
+            let axis_start = egui::pos2(center.x, center.y + earth_radius_px * 1.25);
+            let axis_end = egui::pos2(center.x, center.y - earth_radius_px * 1.25);
+            painter.line_segment(
+                [axis_start, axis_end],
+                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(100, 116, 139, 180))
+            );
+
+            // Draw North Arrow
+            let arrow_tip = egui::pos2(center.x, center.y - earth_radius_px * 1.35);
+            let arrow_left = egui::pos2(center.x - 5.0, center.y - earth_radius_px * 1.22);
+            let arrow_right = egui::pos2(center.x + 5.0, center.y - earth_radius_px * 1.22);
+            
+            painter.line_segment([axis_end, arrow_tip], egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)));
+            painter.line_segment([arrow_tip, arrow_left], egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)));
+            painter.line_segment([arrow_tip, arrow_right], egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)));
+            
+            // Draw "N" (North) label
+            painter.text(
+                egui::pos2(center.x, arrow_tip.y - 8.0),
+                egui::Align2::CENTER_BOTTOM,
+                "N",
+                egui::FontId::proportional(11.0),
+                egui::Color32::from_rgb(56, 189, 248)
+            );
+
             // Draw Orbit paths
             let leo_r = self.config.env.r_earth + self.config.leo_alt_km * 1000.0;
             painter.circle_stroke(center, (leo_r * scale) as f32, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 50)));
@@ -1776,17 +1827,6 @@ impl eframe::App for HydronGuiApp {
                                 egui::Color32::from_rgb(239, 68, 68)
                             };
                             painter.line_segment([*pos1_px, *pos2_px], egui::Stroke::new(1.0, color.linear_multiply(0.4)));
-
-                            // Animated flow particles
-                            let t_offset = (self.current_time * 0.4) % 1.0;
-                            for k in 0..3 {
-                                let u = (k as f32 / 3.0 + t_offset as f32) % 1.0;
-                                let dot_px = egui::pos2(
-                                    pos1_px.x + u * (pos2_px.x - pos1_px.x),
-                                    pos1_px.y + u * (pos2_px.y - pos1_px.y)
-                                );
-                                painter.circle_filled(dot_px, 1.5, egui::Color32::WHITE);
-                            }
                         }
                     }
                 }
@@ -1850,21 +1890,6 @@ impl eframe::App for HydronGuiApp {
                             [*sat_pos_px, best_gs_pos_px],
                             egui::Stroke::new(1.0, base_color)
                         );
-
-                        // Animated photon packets traveling down the beam
-                        let t_offset = (self.current_time * 1.2) % 1.0;
-                        let num_photons = if max_capacity > sat_max_speed * 0.5 { 5 } else { 3 };
-                        for k in 0..num_photons {
-                            let u = ((k as f64 / num_photons as f64) + t_offset) % 1.0;
-                            let u = u as f32;
-                            let photon = egui::pos2(
-                                sat_pos_px.x + u * (best_gs_pos_px.x - sat_pos_px.x),
-                                sat_pos_px.y + u * (best_gs_pos_px.y - sat_pos_px.y),
-                            );
-                            // photon glow
-                            painter.circle_filled(photon, 3.5, egui::Color32::from_rgba_unmultiplied(beam_r, beam_g, beam_b, 40));
-                            painter.circle_filled(photon, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200));
-                        }
 
                         // Speed label at midpoint
                         let mid = egui::pos2(
