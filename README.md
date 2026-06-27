@@ -1,6 +1,4 @@
-# Nome del Progetto
-
-Hydron constellation Demo
+# Hydron constellation Demo
 
 cargo build
 
