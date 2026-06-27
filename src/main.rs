@@ -1841,9 +1841,14 @@ impl eframe::App for HydronGuiApp {
             }
             max_y *= 1.1; // Add 10% headroom
 
-            let min_x = self.history_time[0];
-            let max_x = *self.history_time.last().unwrap();
+            let mut min_x = self.history_time[0];
+            let mut max_x = self.history_time[0];
+            for &t in &self.history_time {
+                if t < min_x { min_x = t; }
+                if t > max_x { max_x = t; }
+            }
             let dx = max_x - min_x;
+
 
             let margin_left = 65.0f32;
             let margin_right = 15.0f32;
