@@ -8,7 +8,9 @@ Developed in Rust using the `egui` immediate-mode GUI framework, this project im
 
 ## 📶 Key Features
 
-### 1. Interactive 3D Globe & Map Visualizer
+### 1. Tabbed Ribbon Toolbar & Interactive HUDs
+* **Tabbed Ribbon Interface**: Reorganizes all controls into a top horizontal ribbon toolbar with tabs: *Simulation*, *Constellation*, *Network & Bitrate*, *ADCS & Sensors*, and *Weather & Stations*. This clean structure maximizes the screen space for 3D visualizations.
+* **Transparent HUD Floating Windows**: Draggable, resizable, and toggleable overlay windows displaying live telemetry, ground station capacities, LEO bitrate lists, and system console logs.
 * **Textured 3D Globe**: Renders a sphere representing Earth using `earth.jpg` coordinates, projected dynamically based on Greenwich Sidereal Time (GST) to align with inertial coordinates (ECI to ECEF).
 * **Multi-Layer Constellation Rendering**: Visualizes circular orbits and positions for LEO, MEO, and GEO segments with configurable visual filters.
 * **Camera Controls**: Zoom with the mouse wheel; rotate the globe by clicking and dragging on empty space.
@@ -22,8 +24,11 @@ Developed in Rust using the `egui` immediate-mode GUI framework, this project im
 * **LEO Satellite Laser Terminal Budget**: LEO satellites are restricted to at most 1 active laser connection at any given time (either a single SGL link to ground OR a single ISL link to another satellite).
 * **LEO Connection Path Optimization**: LEO satellites dynamically select the fastest overall path to ground (either direct SGL or via a MEO/GEO relay) by comparing all SGL and ISL capacities in a single unified greedy optimization.
 * **LEO Capacity Overrides**: Inter-satellite links involving at least one LEO satellite operate at a dynamically configured, stable capacity (bypassing free-space path loss attenuation) to simulate advanced laser terminals.
-* **Real-Time Telemetry Panels**:
-  * **LEO Throughput Panel**: A collapsible panel displaying live SGL and ISL throughput for LEO satellites, with selectable list entries.
+* **Real-Time Telemetry HUD Windows**:
+  * **Satellite Telemetry HUD**: Draggable window displaying ECI orbit positions, attitude quaternions, angular velocities, and physical properties.
+  * **Ground Stations HUD**: Floating window with real-time throughput data and active links.
+  * **LEO Bitrate Channels HUD**: Floating window displaying status and live speed values for LEO active paths.
+  * **System Console Logs HUD**: Floating system logs showing routing notifications.
   * **Ground Station Aggregate Throughput**: Live graphs showing station-by-station and total network aggregate data rates.
 
 ### 3. Simulation & Time Control

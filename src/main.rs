@@ -912,11 +912,26 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RibbonTab {
+    Simulation,
+    Constellation,
+    Network,
+    Adcs,
+    Weather,
+}
+
 pub struct HydronGuiApp {
     config: Config,
     constellation: Constellation,
     ground_stations: Vec<GroundStation>,
     atmos_model: AtmosphereModel,
+
+    active_tab: RibbonTab,
+    show_telemetry_hud: bool,
+    show_logs_hud: bool,
+    show_stations_hud: bool,
+    show_leo_list_hud: bool,
 
     // Control parameters
     is_running: bool,
@@ -1038,6 +1053,11 @@ impl HydronGuiApp {
             disturbance_val: [0.0, 0.0, 0.0],
             
             weather_overrides: vec![Some(0); ground_stations.len()],
+            active_tab: RibbonTab::Simulation,
+            show_telemetry_hud: true,
+            show_logs_hud: true,
+            show_stations_hud: true,
+            show_leo_list_hud: true,
             
             show_leo: true,
             show_meo: true,
@@ -1768,101 +1788,127 @@ impl eframe::App for HydronGuiApp {
         }
 
         // 2. GUI panels layout
+        // 2. GUI panels layout - Tabbed Ribbon Interface
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let btn_text = if self.show_left_panel { "⏴ Stazioni" } else { "⏵ Stazioni" };
-                if ui.button(btn_text).clicked() {
-                    self.show_left_panel = !self.show_left_panel;
-                }
-                ui.separator();
-
                 ui.heading("🛰 HydRON Digital Twin");
                 ui.separator();
 
-                if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" }).clicked() {
-                    self.is_running = !self.is_running;
-                    self.log(if self.is_running { "Simulation Resumed" } else { "Simulation Paused" });
-                }
+                // Selectable Tab Ribbon Headers
+                ui.selectable_value(&mut self.active_tab, RibbonTab::Simulation, "💻 Simulation");
+                ui.selectable_value(&mut self.active_tab, RibbonTab::Constellation, "📡 Constellation");
+                ui.selectable_value(&mut self.active_tab, RibbonTab::Network, "📶 Network & Bitrate");
+                ui.selectable_value(&mut self.active_tab, RibbonTab::Adcs, "⚙ ADCS & Sensors");
+                ui.selectable_value(&mut self.active_tab, RibbonTab::Weather, "🌦 Weather & Stations");
+            });
 
-                if ui.button("⏭ Step").clicked() {
-                    self.is_running = false;
-                    self.current_time += self.step_size;
-                    let sun_vector = [1.0, 0.0, 0.0];
-                    let b_eci_mock = [1e-5, 2e-5, -3e-5];
-                    for gs in &mut self.ground_stations {
-                        step_atmosphere(gs, &mut self.atmos_model);
+            ui.separator();
+
+            // Ribbon Contents Grouped in Horizontal Blocks
+            ui.horizontal(|ui| {
+                match self.active_tab {
+                    RibbonTab::Simulation => {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("CONTROL").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" }).clicked() {
+                                        self.is_running = !self.is_running;
+                                        self.log(if self.is_running { "Simulation Resumed" } else { "Simulation Paused" });
+                                    }
+                                    if ui.button("⏭ Step").clicked() {
+                                        self.is_running = false;
+                                        self.current_time += self.step_size;
+                                        let sun_vector = [1.0, 0.0, 0.0];
+                                        let b_eci_mock = [1e-5, 2e-5, -3e-5];
+                                        for gs in &mut self.ground_stations {
+                                            step_atmosphere(gs, &mut self.atmos_model);
+                                        }
+                                        for segment in &mut self.constellation.segments {
+                                            for sat in &mut segment.satellites {
+                                                step_orbit(sat, self.step_size, &self.config.env, sun_vector);
+                                                step_attitude(sat, self.step_size, b_eci_mock, [1e-3, -5e-4, 2e-4], [0.1, -0.05, 0.1]);
+                                            }
+                                        }
+                                        self.log("Single Step Executed");
+                                    }
+                                    if ui.button("↺ Reset").clicked() {
+                                        pending_reset = true;
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("TIME WARP").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Slider::new(&mut self.time_warp, -50..=50).text("x"));
+                                    ui.separator();
+                                    ui.label(format!("Epoch: {:.1}s", self.current_time));
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("REPORTS").strong().color(egui::Color32::LIGHT_BLUE));
+                                if ui.button("📥 Esporta 24h CSV").clicked() {
+                                    match self.run_and_export_24h() {
+                                        Ok(file) => {
+                                            self.log(&format!("Dati di 24h esportati in '{}'", file));
+                                        }
+                                        Err(e) => {
+                                            self.log(&format!("Errore esportazione dati: {}", e));
+                                        }
+                                    }
+                                }
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("HUD WINDOWS").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.show_telemetry_hud, "Telemetry");
+                                    ui.checkbox(&mut self.show_stations_hud, "Stations");
+                                    ui.checkbox(&mut self.show_leo_list_hud, "LEO Speeds");
+                                    ui.checkbox(&mut self.show_logs_hud, "Console Logs");
+                                });
+                            });
+                        });
                     }
-                    for segment in &mut self.constellation.segments {
-                        for sat in &mut segment.satellites {
-                            step_orbit(sat, self.step_size, &self.config.env, sun_vector);
-                            step_attitude(sat, self.step_size, b_eci_mock, [1e-3, -5e-4, 2e-4], [0.1, -0.05, 0.1]);
-                        }
-                    }
-                    self.log("Single Step Executed");
-                }
 
-                if ui.button("↺ Reset").clicked() {
-                    pending_reset = true;
-                }
+                    RibbonTab::Constellation => {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("LEO SEGMENT").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.add(egui::Slider::new(&mut self.leo_num_input, 0..=20).text("Sats"));
+                                ui.add(egui::Slider::new(&mut self.leo_alt_input, 200.0..=1200.0).text("Alt (km)"));
+                                ui.add(egui::Slider::new(&mut self.leo_inc_input, 0.0..=180.0).text("Inc (°)"));
+                            });
+                        });
 
-                if ui.button("📥 Esporta 24h CSV").clicked() {
-                    match self.run_and_export_24h() {
-                        Ok(file) => {
-                            self.log(&format!("Dati di 24h esportati in '{}'", file));
-                        }
-                        Err(e) => {
-                            self.log(&format!("Errore esportazione dati: {}", e));
-                        }
-                    }
-                }
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("MEO SEGMENT").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.add(egui::Slider::new(&mut self.meo_num_input, 0..=8).text("Sats"));
+                                ui.add(egui::Slider::new(&mut self.meo_alt_input, 5000.0..=15000.0).text("Alt (km)"));
+                                ui.add(egui::Slider::new(&mut self.meo_inc_input, 0.0..=180.0).text("Inc (°)"));
+                            });
+                        });
 
-                ui.separator();
-                ui.label("Time Warp:");
-                ui.add(egui::Slider::new(&mut self.time_warp, -50..=50).text("x"));
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("GEO SEGMENT").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.add(egui::Slider::new(&mut self.geo_num_input, 0..=6).text("Sats"));
+                                ui.add(egui::Slider::new(&mut self.geo_alt_input, 30000.0..=40000.0).text("Alt (km)"));
+                                ui.add(egui::Slider::new(&mut self.geo_inc_input, 0.0..=90.0).text("Inc (°)"));
+                            });
+                        });
 
-                ui.separator();
-                ui.label(format!("Epoch: {:.1}s", self.current_time));
-            }); // horizontal
-        }); // top_panel
-
-        if self.show_left_panel {
-            egui::SidePanel::left("left_panel").width_range(290.0..=340.0).show(ctx, |ui| {
-                ui.separator();
-                ui.collapsing("⚙ Filtri Visualizzazione", |ui| {
-                    ui.checkbox(&mut self.show_leo, "LEO ISL");
-                    ui.checkbox(&mut self.show_meo, "MEO ISL");
-                    ui.checkbox(&mut self.show_geo, "GEO ISL");
-                    ui.checkbox(&mut self.show_sgl, "Ground Links (SGL)");
-                    ui.separator();
-                    ui.label("Zoom Mappa 3D:");
-                    ui.add(egui::Slider::new(&mut self.map_zoom, 0.1..=10.0).logarithmic(true));
-                });
-
-                ui.separator();
-                ui.collapsing("📶 Bitrate Massimo Satelliti", |ui| {
-                    ui.add(egui::Slider::new(&mut self.leo_max_bitrate, 10.0..=500.0).text("LEO (Gbps)"));
-                    ui.add(egui::Slider::new(&mut self.meo_max_bitrate, 50.0..=2000.0).text("MEO (Gbps)"));
-                    ui.add(egui::Slider::new(&mut self.geo_max_bitrate, 100.0..=5000.0).text("GEO (Gbps)"));
-                });
-
-                ui.separator();
-                ui.collapsing("📡 Modifica Costellazione", |ui| {
-                    ui.collapsing("Parametri Segmenti", |ui| {
-                        ui.label("Segmento LEO:");
-                        ui.add(egui::Slider::new(&mut self.leo_num_input, 0..=20).text("Satelliti"));
-                        ui.add(egui::Slider::new(&mut self.leo_alt_input, 200.0..=1200.0).text("Quota (km)"));
-                        ui.add(egui::Slider::new(&mut self.leo_inc_input, 0.0..=180.0).text("Inclinazione (°)"));
-
-                        ui.label("Segmento MEO:");
-                        ui.add(egui::Slider::new(&mut self.meo_num_input, 0..=8).text("Satelliti"));
-                        ui.add(egui::Slider::new(&mut self.meo_alt_input, 5000.0..=15000.0).text("Quota (km)"));
-                        ui.add(egui::Slider::new(&mut self.meo_inc_input, 0.0..=180.0).text("Inclinazione (°)"));
-
-                        ui.label("Segmento GEO:");
-                        ui.add(egui::Slider::new(&mut self.geo_num_input, 0..=6).text("Satelliti"));
-                        ui.add(egui::Slider::new(&mut self.geo_alt_input, 30000.0..=40000.0).text("Quota (km)"));
-                        ui.add(egui::Slider::new(&mut self.geo_inc_input, 0.0..=90.0).text("Inclinazione (°)"));
-                        
+                        // Check for changes to apply configuration dynamically
                         let changed = self.config.leo_num != self.leo_num_input
                             || self.config.leo_alt_km != self.leo_alt_input
                             || self.config.leo_inc_deg != self.leo_inc_input
@@ -1877,17 +1923,13 @@ impl eframe::App for HydronGuiApp {
                             self.config.leo_num = self.leo_num_input;
                             self.config.leo_alt_km = self.leo_alt_input;
                             self.config.leo_inc_deg = self.leo_inc_input;
-
                             self.config.meo_num = self.meo_num_input;
                             self.config.meo_alt_km = self.meo_alt_input;
                             self.config.meo_inc_deg = self.meo_inc_input;
-
                             self.config.geo_num = self.geo_num_input;
                             self.config.geo_alt_km = self.geo_alt_input;
                             self.config.geo_inc_deg = self.geo_inc_input;
-
                             self.constellation = create_satellites_from_config(&self.config);
-                            
                             let mut found_any = false;
                             for seg in &self.constellation.segments {
                                 if !seg.satellites.is_empty() {
@@ -1899,367 +1941,417 @@ impl eframe::App for HydronGuiApp {
                             if !found_any {
                                 self.selected_satellite_id = "None".to_string();
                             }
-                            
                             self.update_input_fields_for_selected();
                             self.log("Constellation reconfigured dynamically");
                         }
 
-                        ui.separator();
-                        ui.label("➕ Aggiungi Singolo Satellite:");
-                        let mut type_changed = false;
-                        ui.horizontal(|ui| {
-                            if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::LEO, "LEO").clicked() { type_changed = true; }
-                            if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::MEO, "MEO").clicked() { type_changed = true; }
-                            if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::GEO, "GEO").clicked() { type_changed = true; }
-                        });
-                        
-                        if type_changed {
-                            match self.add_sat_orbit_type {
-                                OrbitType::LEO => {
-                                    self.add_sat_alt_km = 550.0;
-                                    self.add_sat_inc_deg = 97.6;
-                                    self.add_sat_mass = 20.0;
-                                    self.add_sat_area = 0.1;
-                                    self.add_sat_cd = 2.2;
-                                    self.add_sat_cr = 1.2;
-                                }
-                                OrbitType::MEO => {
-                                    self.add_sat_alt_km = 10000.0;
-                                    self.add_sat_inc_deg = 55.0;
-                                    self.add_sat_mass = 50.0;
-                                    self.add_sat_area = 0.25;
-                                    self.add_sat_cd = 0.0;
-                                    self.add_sat_cr = 1.2;
-                                }
-                                OrbitType::GEO => {
-                                    self.add_sat_alt_km = 35786.0;
-                                    self.add_sat_inc_deg = 0.0;
-                                    self.add_sat_mass = 200.0;
-                                    self.add_sat_area = 1.5;
-                                    self.add_sat_cd = 0.0;
-                                    self.add_sat_cr = 1.2;
-                                }
-                            }
-                        }
-
-                        let (alt_min, alt_max) = match self.add_sat_orbit_type {
-                            OrbitType::LEO => (200.0, 1200.0),
-                            OrbitType::MEO => (5000.0, 15000.0),
-                            OrbitType::GEO => (30000.0, 40000.0),
-                        };
-                        ui.add(egui::Slider::new(&mut self.add_sat_alt_km, alt_min..=alt_max).text("Quota (km)"));
-                        
-                        let inc_max = match self.add_sat_orbit_type {
-                            OrbitType::GEO => 90.0,
-                            _ => 180.0,
-                        };
-                        ui.add(egui::Slider::new(&mut self.add_sat_inc_deg, 0.0..=inc_max).text("Inclinazione (°)"));
-
-                        ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut self.add_sat_mass).speed(1.0).clamp_range(1.0..=1000.0));
-                            ui.label("Massa (kg)");
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut self.add_sat_area).speed(0.01).clamp_range(0.01..=10.0));
-                            ui.label("Area (m²)");
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut self.add_sat_cd).speed(0.1).clamp_range(0.0..=5.0));
-                            ui.label("Cd (Drag)");
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut self.add_sat_cr).speed(0.1).clamp_range(0.0..=5.0));
-                            ui.label("Cr (Rad Press)");
-                        });
-
-                        if ui.button("➕ Aggiungi Satellite").clicked() {
-                            let r_earth = self.config.env.r_earth;
-                            let r_mag = r_earth + self.add_sat_alt_km * 1000.0;
-                            let v_mag = (self.config.env.mu / r_mag).sqrt();
-                            let inc = self.add_sat_inc_deg.to_radians();
-
-                            let segment_idx = match self.add_sat_orbit_type {
-                                OrbitType::LEO => 0,
-                                OrbitType::MEO => 1,
-                                OrbitType::GEO => 2,
-                            };
-                            let segment = &mut self.constellation.segments[segment_idx];
-                            let new_id = format!("{:?}_{:02}", self.add_sat_orbit_type, segment.satellites.len());
-
-                            let u = 0.0_f64; // True anomaly 0
-                            let r_plane = [r_mag * u.cos(), r_mag * u.sin(), 0.0];
-                            let v_plane = [-v_mag * u.sin(), v_mag * u.cos(), 0.0];
-                            
-                            let c_i = inc.cos();
-                            let s_i = inc.sin();
-                            
-                            let r_eci = [
-                                r_plane[0],
-                                r_plane[1] * c_i,
-                                r_plane[1] * s_i
-                            ];
-                            let v_eci = [
-                                v_plane[0],
-                                v_plane[1] * c_i,
-                                v_plane[1] * s_i
-                            ];
-
-                            let new_sat = Satellite {
-                                id: new_id.clone(),
-                                orbit_type: self.add_sat_orbit_type.clone(),
-                                r: r_eci,
-                                v: v_eci,
-                                q: [1.0, 0.0, 0.0, 0.0],
-                                omega: [0.0, 0.0, 0.0],
-                                mass: self.add_sat_mass,
-                                area: self.add_sat_area,
-                                cd: self.add_sat_cd,
-                                cr: self.add_sat_cr,
-                                inertia: match self.add_sat_orbit_type {
-                                    OrbitType::LEO => [0.4, 0.4, 0.5],
-                                    OrbitType::MEO => [1.5, 1.5, 2.0],
-                                    OrbitType::GEO => [15.0, 15.0, 20.0],
-                                },
-                                h_rw: [0.0, 0.0, 0.0],
-                            };
-
-                            segment.satellites.push(new_sat);
-
-                            match self.add_sat_orbit_type {
-                                OrbitType::LEO => {
-                                    self.config.leo_num += 1;
-                                    self.leo_num_input = self.config.leo_num;
-                                }
-                                OrbitType::MEO => {
-                                    self.config.meo_num += 1;
-                                    self.meo_num_input = self.config.meo_num;
-                                }
-                                OrbitType::GEO => {
-                                    self.config.geo_num += 1;
-                                    self.geo_num_input = self.config.geo_num;
-                                }
-                            }
-
-                            self.selected_satellite_id = new_id.clone();
-                            self.update_input_fields_for_selected();
-                            self.log(&format!("Aggiunto satellite personalizzato: {}", new_id));
-                        }
-                    }); // Parametri Segmenti
-
-                    ui.separator();
-                    ui.collapsing("🌦 Meteo Stazioni", |ui| {
-                        for i in 0..self.ground_stations.len() {
-                            let name = self.ground_stations[i].name.clone();
-                            ui.label(format!("{}:", name));
-                            ui.horizontal(|ui| {
-                                if ui.selectable_label(self.weather_overrides[i].is_none(), "Markov").clicked() {
-                                    self.weather_overrides[i] = None;
-                                }
-                                for w_idx in 0..self.atmos_model.states.len() {
-                                    let w_name = &self.atmos_model.states[w_idx];
-                                    if ui.selectable_label(self.weather_overrides[i] == Some(w_idx), w_name).clicked() {
-                                        self.weather_overrides[i] = Some(w_idx);
-                                    }
-                                }
-                            });
-                        }
-                    }); // Meteo Stazioni
-
-                    ui.separator();
-                    ui.collapsing("📡 Modifica Stazioni", |ui| {
-                        let mut to_remove = None;
-                        for i in 0..self.ground_stations.len() {
-                            ui.group(|ui| {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("➕ ADD CUSTOM SATELLITE").strong().color(egui::Color32::LIGHT_BLUE));
                                 ui.horizontal(|ui| {
-                                    let mut name_edit = self.ground_stations[i].name.clone();
-                                    if ui.text_edit_singleline(&mut name_edit).changed() {
-                                        self.ground_stations[i].name = name_edit;
-                                    }
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("❌").clicked() {
-                                            to_remove = Some(i);
+                                    let mut type_changed = false;
+                                    if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::LEO, "LEO").clicked() { type_changed = true; }
+                                    if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::MEO, "MEO").clicked() { type_changed = true; }
+                                    if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::GEO, "GEO").clicked() { type_changed = true; }
+
+                                    if type_changed {
+                                        match self.add_sat_orbit_type {
+                                            OrbitType::LEO => {
+                                                self.add_sat_alt_km = 550.0;
+                                                self.add_sat_inc_deg = 97.6;
+                                                self.add_sat_mass = 20.0;
+                                                self.add_sat_area = 0.1;
+                                                self.add_sat_cd = 2.2;
+                                                self.add_sat_cr = 1.2;
+                                            }
+                                            OrbitType::MEO => {
+                                                self.add_sat_alt_km = 10000.0;
+                                                self.add_sat_inc_deg = 55.0;
+                                                self.add_sat_mass = 50.0;
+                                                self.add_sat_area = 0.25;
+                                                self.add_sat_cd = 0.0;
+                                                self.add_sat_cr = 1.2;
+                                            }
+                                            OrbitType::GEO => {
+                                                self.add_sat_alt_km = 35786.0;
+                                                self.add_sat_inc_deg = 0.0;
+                                                self.add_sat_mass = 200.0;
+                                                self.add_sat_area = 1.5;
+                                                self.add_sat_cd = 0.0;
+                                                self.add_sat_cr = 1.2;
+                                            }
                                         }
-                                    });
+                                    }
                                 });
-                                
-                                let mut lat_deg = self.ground_stations[i].lat_rad.to_degrees();
-                                let mut lon_deg = self.ground_stations[i].lon_rad.to_degrees();
-                                let mut alt_m = self.ground_stations[i].alt_m;
-
-                                if ui.add(egui::Slider::new(&mut lat_deg, -90.0..=90.0).text("Lat (°)")).changed() {
-                                    self.ground_stations[i].lat_rad = lat_deg.to_radians();
-                                }
-                                if ui.add(egui::Slider::new(&mut lon_deg, -180.0..=180.0).text("Lon (°)")).changed() {
-                                    self.ground_stations[i].lon_rad = lon_deg.to_radians();
-                                }
-                                if ui.add(egui::Slider::new(&mut alt_m, 0.0..=5000.0).text("Alt (m)")).changed() {
-                                    self.ground_stations[i].alt_m = alt_m;
-                                }
-                            });
-                            ui.add_space(2.0);
-                        }
-
-                        if let Some(idx) = to_remove {
-                            pending_remove = Some(idx);
-                        }
-
-                        ui.add_space(4.0);
-                        if ui.button("➕ Aggiungi Stazione").clicked() {
-                            pending_add = true;
-                        }
-                    });
-                }); // 📡 Modifica Costellazione outer collapsing
-
-                ui.separator();
-                ui.collapsing("🛰 Stazioni di Terra", |ui| {
-                    egui::ScrollArea::vertical().id_source("gs_scroll").show(ui, |ui| {
-                        for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
-                            let weather_name = &self.atmos_model.states[gs.atmos_state];
-                            
-                            let (wx_icon, wx_color) = match gs.atmos_state {
-                                0 => ("☀", egui::Color32::from_rgb(34, 197, 94)),
-                        1 => ("🌤", egui::Color32::from_rgb(234, 179, 8)),
-                        2 => ("☁", egui::Color32::from_rgb(156, 163, 175)),
-                        _ => ("🌧", egui::Color32::from_rgb(239, 68, 68)),
-                    };
- 
-                    let connected = &connected_sats_per_gs[gs_idx];
-                    let total_gbps = gs_throughputs[gs_idx] as f64;
-
-                    ui.group(|ui| {
-                        // Station header
-                        ui.horizontal(|ui| {
-                            ui.colored_label(wx_color, wx_icon);
-                            ui.colored_label(egui::Color32::WHITE, &gs.name);
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.colored_label(wx_color, weather_name.to_uppercase());
-                            });
-                        });
-
-                        // Subtitle row
-                        ui.horizontal(|ui| {
-                            ui.small(format!("{}", gs.id));
-                            ui.separator();
-                            ui.small(format!("k={:.4}/km", gs.k_value * 1000.0));
-                            ui.separator();
-                            ui.small("GS: ∞ Gbps");
-                        });
-
-                        ui.separator();
-
-                        // Total throughput + mini bar
-                        if connected.is_empty() {
-                            ui.colored_label(egui::Color32::DARK_GRAY, "Nessun satellite in vista");
-                        } else {
-                            ui.horizontal(|ui| {
-                                ui.label("📡 Throughput:");
-                                let color = if total_gbps > 200.0 {
-                                    egui::Color32::from_rgb(34, 197, 94)
-                                } else if total_gbps > 50.0 {
-                                    egui::Color32::from_rgb(234, 179, 8)
-                                } else {
-                                    egui::Color32::from_rgb(239, 68, 68)
-                                };
-                                ui.colored_label(color, format!("{:.1} Gbps", total_gbps));
-                            });
-
-                            // Throughput bar (max scale = 800 Gbps = 1 GEO)
-                            let bar_w = (ui.available_width() - 4.0).max(0.0);
-                            let bar_h = 5.0_f32;
-                            let fill_frac = (total_gbps / 800.0).min(1.0) as f32;
-                            let (bar_rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::hover());
-                            ui.painter().rect_filled(bar_rect, 2.0, egui::Color32::from_rgb(30, 40, 60));
-                            if fill_frac > 0.0 {
-                                let fill_w = (bar_w * fill_frac).max(0.0);
-                                let fill_rect = egui::Rect::from_min_size(bar_rect.min, egui::vec2(fill_w, bar_h));
-                                let bar_color = if total_gbps > 200.0 {
-                                    egui::Color32::from_rgb(34, 197, 94)
-                                } else if total_gbps > 50.0 {
-                                    egui::Color32::from_rgb(234, 179, 8)
-                                } else {
-                                    egui::Color32::from_rgb(239, 68, 68)
-                                };
-                                ui.painter().rect_filled(fill_rect, 2.0, bar_color);
-                            }
-
-                            ui.add_space(2.0);
-
-                            // Connected satellites list
-                            for (sat_id, orbit_label, speed, sat_max) in connected {
-                                let frac = (speed / sat_max).min(1.0);
-                                let link_color = if frac > 0.5 {
-                                    egui::Color32::from_rgb(34, 197, 94)
-                                } else if frac > 0.1 {
-                                    egui::Color32::from_rgb(234, 179, 8)
-                                } else {
-                                    egui::Color32::from_rgb(239, 68, 68)
-                                };
                                 ui.horizontal(|ui| {
-                                    ui.colored_label(link_color, "◉");
-                                    ui.colored_label(egui::Color32::LIGHT_GRAY, format!("{} [{}]", sat_id, orbit_label));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.colored_label(link_color, format!("{:.1} Gbps", speed));
+                                    let (alt_min, alt_max) = match self.add_sat_orbit_type {
+                                        OrbitType::LEO => (200.0, 1200.0),
+                                        OrbitType::MEO => (5000.0, 15000.0),
+                                        OrbitType::GEO => (30000.0, 40000.0),
+                                    };
+                                    ui.vertical(|ui| {
+                                        ui.add(egui::Slider::new(&mut self.add_sat_alt_km, alt_min..=alt_max).text("Alt (km)"));
+                                        let inc_max = match self.add_sat_orbit_type {
+                                            OrbitType::GEO => 90.0,
+                                            _ => 180.0,
+                                        };
+                                        ui.add(egui::Slider::new(&mut self.add_sat_inc_deg, 0.0..=inc_max).text("Inc (°)"));
                                     });
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut self.add_sat_mass).speed(1.0).clamp_range(1.0..=1000.0));
+                                            ui.label("Mass (kg)");
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut self.add_sat_area).speed(0.01).clamp_range(0.01..=10.0));
+                                            ui.label("Area (m²)");
+                                        });
+                                    });
+                                    if ui.button("➕ Add").clicked() {
+                                        let r_earth = self.config.env.r_earth;
+                                        let r_mag = r_earth + self.add_sat_alt_km * 1000.0;
+                                        let v_mag = (self.config.env.mu / r_mag).sqrt();
+                                        let inc = self.add_sat_inc_deg.to_radians();
+
+                                        let segment_idx = match self.add_sat_orbit_type {
+                                            OrbitType::LEO => 0,
+                                            OrbitType::MEO => 1,
+                                            OrbitType::GEO => 2,
+                                        };
+                                        let segment = &mut self.constellation.segments[segment_idx];
+                                        let new_id = format!("{:?}_{:02}", self.add_sat_orbit_type, segment.satellites.len());
+
+                                        let u = 0.0_f64;
+                                        let r_plane = [r_mag * u.cos(), r_mag * u.sin(), 0.0];
+                                        let v_plane = [-v_mag * u.sin(), v_mag * u.cos(), 0.0];
+                                        let c_i = inc.cos();
+                                        let s_i = inc.sin();
+                                        let r_eci = [r_plane[0], r_plane[1] * c_i, r_plane[1] * s_i];
+                                        let v_eci = [v_plane[0], v_plane[1] * c_i, v_plane[1] * s_i];
+
+                                        let new_sat = Satellite {
+                                            id: new_id.clone(),
+                                            orbit_type: self.add_sat_orbit_type.clone(),
+                                            r: r_eci,
+                                            v: v_eci,
+                                            q: [1.0, 0.0, 0.0, 0.0],
+                                            omega: [0.0, 0.0, 0.0],
+                                            mass: self.add_sat_mass,
+                                            area: self.add_sat_area,
+                                            cd: self.add_sat_cd,
+                                            cr: self.add_sat_cr,
+                                            inertia: match self.add_sat_orbit_type {
+                                                OrbitType::LEO => [0.4, 0.4, 0.5],
+                                                OrbitType::MEO => [1.5, 1.5, 2.0],
+                                                OrbitType::GEO => [15.0, 15.0, 20.0],
+                                            },
+                                            h_rw: [0.0, 0.0, 0.0],
+                                        };
+
+                                        segment.satellites.push(new_sat);
+                                        match self.add_sat_orbit_type {
+                                            OrbitType::LEO => {
+                                                self.config.leo_num += 1;
+                                                self.leo_num_input = self.config.leo_num;
+                                            }
+                                            OrbitType::MEO => {
+                                                self.config.meo_num += 1;
+                                                self.meo_num_input = self.config.meo_num;
+                                            }
+                                            OrbitType::GEO => {
+                                                self.config.geo_num += 1;
+                                                self.geo_num_input = self.config.geo_num;
+                                            }
+                                        }
+
+                                        self.selected_satellite_id = new_id.clone();
+                                        self.update_input_fields_for_selected();
+                                        self.log(&format!("Added custom satellite: {}", new_id));
+                                    }
                                 });
-                            }
-                        }
-                    });
-                    ui.add_space(3.0);
-                } // end for gs
-            }); // ScrollArea
-                }); // Collapsing Stazioni di Terra
-            }); // left_panel
-        }
-
-        egui::SidePanel::right("right_panel").width_range(280.0..=330.0).show(ctx, |ui| {
-            ui.heading("Pannello Satelliti");
-            ui.separator();
-
-            ui.label("Seleziona Satellite:");
-            egui::ComboBox::from_label("")
-                .selected_text(self.selected_satellite_id.clone())
-                .show_ui(ui, |ui| {
-                    let sat_ids: Vec<String> = self.constellation.segments.iter()
-                        .flat_map(|seg| seg.satellites.iter().map(|s| s.id.clone()))
-                        .collect();
-                    for id in sat_ids {
-                        if ui.selectable_value(&mut self.selected_satellite_id, id.clone(), id.clone()).clicked() {
-                            self.update_input_fields_for_selected();
-                        }
+                            });
+                        });
                     }
-                });
 
-            ui.separator();
-
-            ui.collapsing("📶 Bitrate Satelliti LEO", |ui| {
-                egui::ScrollArea::vertical().id_source("leo_scroll").max_height(200.0).show(ui, |ui| {
-                    let mut leo_sats = Vec::new();
-                    for seg in &self.constellation.segments {
-                        if seg.orbit_type == OrbitType::LEO {
-                            for sat in &seg.satellites {
-                                leo_sats.push(sat.id.clone());
-                            }
-                        }
-                    }
-                    leo_sats.sort();
-
-                    for sat_id in leo_sats {
-                        let sgl_info = sat_sgl_link.get(&sat_id);
-                        let isl_info = sat_isl_link.get(&sat_id);
-                        
-                        let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
-                        
-                        let color = if total_speed > 50.0 {
-                            egui::Color32::from_rgb(34, 197, 94)
-                        } else if total_speed > 10.0 {
-                            egui::Color32::from_rgb(234, 179, 8)
-                        } else if total_speed > 0.0 {
-                            egui::Color32::from_rgb(239, 68, 68)
-                        } else {
-                            egui::Color32::from_rgb(156, 163, 175)
-                        };
+                    RibbonTab::Network => {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("MAP FILTERS").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.show_leo, "LEO ISL");
+                                    ui.checkbox(&mut self.show_meo, "MEO ISL");
+                                    ui.checkbox(&mut self.show_geo, "GEO ISL");
+                                    ui.checkbox(&mut self.show_sgl, "Ground Links (SGL)");
+                                });
+                            });
+                        });
 
                         ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("MAX BITRATES").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Slider::new(&mut self.leo_max_bitrate, 10.0..=500.0).text("LEO (Gbps)"));
+                                    ui.add(egui::Slider::new(&mut self.meo_max_bitrate, 50.0..=2000.0).text("MEO (Gbps)"));
+                                    ui.add(egui::Slider::new(&mut self.geo_max_bitrate, 100.0..=5000.0).text("GEO (Gbps)"));
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("MAP ZOOM").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.add(egui::Slider::new(&mut self.map_zoom, 0.1..=10.0).logarithmic(true).text("Zoom"));
+                            });
+                        });
+                    }
+
+                    RibbonTab::Adcs => {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("PHYSICAL EDIT").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Slider::new(&mut self.sat_mass_input, 1.0..=500.0).text("Mass (kg)"));
+                                    ui.add(egui::Slider::new(&mut self.sat_cd_input, 0.0..=4.0).text("Cd"));
+                                    ui.add(egui::Slider::new(&mut self.sat_cr_input, 0.0..=3.0).text("Cr"));
+                                    if ui.button("Apply Parameters").clicked() {
+                                        let id = self.selected_satellite_id.clone();
+                                        for seg in &mut self.constellation.segments {
+                                            for s in &mut seg.satellites {
+                                                if s.id == id {
+                                                    s.mass = self.sat_mass_input;
+                                                    s.cd = self.sat_cd_input;
+                                                    s.cr = self.sat_cr_input;
+                                                }
+                                            }
+                                        }
+                                        self.log(&format!("Updated physical params for satellite {}", id));
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("DISTURBANCE TORQUE").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Slider::new(&mut self.disturbance_val[0], -10.0..=10.0).text("Tx"));
+                                    ui.add(egui::Slider::new(&mut self.disturbance_val[1], -10.0..=10.0).text("Ty"));
+                                    ui.add(egui::Slider::new(&mut self.disturbance_val[2], -10.0..=10.0).text("Tz"));
+                                    if ui.button("⚡ Inject Torque").clicked() {
+                                        self.force_disturbance = true;
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("SENSOR NOISE").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Slider::new(&mut self.gyro_noise, 1e-7..=1e-3).logarithmic(true).text("Gyro"));
+                                    ui.add(egui::Slider::new(&mut self.mag_noise, 1e-9..=1e-5).logarithmic(true).text("Mag"));
+                                    ui.add(egui::Slider::new(&mut self.sun_noise, 1e-5..=1e-1).logarithmic(true).text("Sun"));
+                                    ui.add(egui::Slider::new(&mut self.st_noise, 1e-6..=1e-2).logarithmic(true).text("Star"));
+                                });
+                            });
+                        });
+                    }
+
+                    RibbonTab::Weather => {
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("WEATHER STATION OVERRIDES").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    for i in 0..self.ground_stations.len() {
+                                        let name = self.ground_stations[i].name.clone();
+                                        ui.vertical(|ui| {
+                                            ui.small(&name);
+                                            ui.horizontal(|ui| {
+                                                if ui.selectable_label(self.weather_overrides[i].is_none(), "Markov").clicked() {
+                                                    self.weather_overrides[i] = None;
+                                                }
+                                                for w_idx in 0..self.atmos_model.states.len() {
+                                                    let w_name = &self.atmos_model.states[w_idx];
+                                                    if ui.selectable_label(self.weather_overrides[i] == Some(w_idx), w_name).clicked() {
+                                                        self.weather_overrides[i] = Some(w_idx);
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("EDIT STATIONS").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    let mut to_remove = None;
+                                    for i in 0..self.ground_stations.len() {
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                let mut name_edit = self.ground_stations[i].name.clone();
+                                                if ui.text_edit_singleline(&mut name_edit).changed() {
+                                                    self.ground_stations[i].name = name_edit;
+                                                }
+                                                if ui.button("❌").clicked() {
+                                                    to_remove = Some(i);
+                                                }
+                                            });
+                                        });
+                                    }
+                                    if let Some(idx) = to_remove {
+                                        pending_remove = Some(idx);
+                                    }
+                                    if ui.button("➕ Add Station").clicked() {
+                                        pending_add = true;
+                                    }
+                                });
+                            });
+                        });
+                    }
+                }
+            });
+            ui.add_space(4.0);
+        });
+
+        // 3. Floating HUD Windows (egui::Window)
+        if self.show_telemetry_hud {
+            let mut open = self.show_telemetry_hud;
+            egui::Window::new("📊 Telemetria Satellite")
+                .open(&mut open)
+                .default_pos(egui::pos2(850.0, 150.0))
+                .default_size(egui::vec2(280.0, 320.0))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Seleziona:");
+                        egui::ComboBox::from_label("")
+                            .selected_text(self.selected_satellite_id.clone())
+                            .show_ui(ui, |ui| {
+                                let sat_ids: Vec<String> = self.constellation.segments.iter()
+                                    .flat_map(|seg| seg.satellites.iter().map(|s| s.id.clone()))
+                                    .collect();
+                                for id in sat_ids {
+                                    if ui.selectable_value(&mut self.selected_satellite_id, id.clone(), id.clone()).clicked() {
+                                        self.update_input_fields_for_selected();
+                                    }
+                                }
+                            });
+                    });
+
+                    ui.separator();
+
+                    let sat_telemetry = self.find_satellite(&self.selected_satellite_id).map(|s| (
+                        s.mass,
+                        s.inertia,
+                        s.r,
+                        s.v,
+                        s.q,
+                        s.omega,
+                        s.h_rw,
+                        s.orbit_type.clone(),
+                    ));
+
+                    if let Some((mass, inertia, r, v, q, omega, h_rw, orbit_type)) = sat_telemetry {
+                        let max_spd = match orbit_type {
+                            OrbitType::LEO => self.leo_max_bitrate,
+                            OrbitType::MEO => self.meo_max_bitrate,
+                            OrbitType::GEO => self.geo_max_bitrate,
+                        };
+                        ui.label(format!("Vel. Max Canale: {:.0} Gbps", max_spd));
+                        ui.label(format!("Massa Bus: {:.1} kg", mass));
+                        ui.label(format!("Inerzia: [{:.2}, {:.2}, {:.2}]", inertia[0], inertia[1], inertia[2]));
+                        
+                        ui.separator();
+                        ui.label(egui::RichText::new("Orbita (ECI):").strong());
+                        ui.small(format!("Pos: [{:.1}, {:.1}, {:.1}] km", r[0]/1000.0, r[1]/1000.0, r[2]/1000.0));
+                        ui.small(format!("Vel: [{:.3}, {:.3}, {:.3}] km/s", v[0]/1000.0, v[1]/1000.0, v[2]/1000.0));
+
+                        ui.separator();
+                        ui.label(egui::RichText::new("Attitudine & ADCS:").strong());
+                        ui.small(format!("Q: [{:.4}, {:.4}, {:.4}, {:.4}]", q[0], q[1], q[2], q[3]));
+                        ui.small(format!("Omega: [{:.4}, {:.4}, {:.4}] rad/s", omega[0], omega[1], omega[2]));
+                        ui.small(format!("H_rw: [{:.4}, {:.4}, {:.4}] Nms", h_rw[0], h_rw[1], h_rw[2]));
+                    }
+                });
+            self.show_telemetry_hud = open;
+        }
+
+        if self.show_stations_hud {
+            let mut open = self.show_stations_hud;
+            egui::Window::new("📡 Stazioni di Terra")
+                .open(&mut open)
+                .default_pos(egui::pos2(50.0, 150.0))
+                .default_size(egui::vec2(280.0, 300.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().id_source("hud_gs_scroll").show(ui, |ui| {
+                        for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
+                            let weather_name = &self.atmos_model.states[gs.atmos_state];
+                            let (wx_icon, wx_color) = match gs.atmos_state {
+                                0 => ("☀", egui::Color32::from_rgb(34, 197, 94)),
+                                1 => ("🌤", egui::Color32::from_rgb(234, 179, 8)),
+                                2 => ("☁", egui::Color32::from_rgb(156, 163, 175)),
+                                _ => ("🌧", egui::Color32::from_rgb(239, 68, 68)),
+                            };
+                            let connected = &connected_sats_per_gs[gs_idx];
+                            let total_gbps = gs_throughputs[gs_idx] as f64;
+
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(wx_color, wx_icon);
+                                    ui.colored_label(egui::Color32::WHITE, &gs.name);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.colored_label(wx_color, weather_name.to_uppercase());
+                                    });
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.small(format!("Throughput: {:.1} Gbps", total_gbps));
+                                });
+                                if !connected.is_empty() {
+                                    ui.separator();
+                                    for (sat_id, _, speed, _) in connected {
+                                        ui.small(format!("  • {}: {:.1} Gbps", sat_id, speed));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+            self.show_stations_hud = open;
+        }
+
+        if self.show_leo_list_hud {
+            let mut open = self.show_leo_list_hud;
+            egui::Window::new("📶 Bitrate Canali LEO")
+                .open(&mut open)
+                .default_pos(egui::pos2(50.0, 480.0))
+                .default_size(egui::vec2(280.0, 200.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().id_source("hud_leo_scroll").show(ui, |ui| {
+                        let mut leo_sats = Vec::new();
+                        for seg in &self.constellation.segments {
+                            if seg.orbit_type == OrbitType::LEO {
+                                for sat in &seg.satellites {
+                                    leo_sats.push(sat.id.clone());
+                                }
+                            }
+                        }
+                        leo_sats.sort();
+
+                        for sat_id in leo_sats {
+                            let sgl_info = sat_sgl_link.get(&sat_id);
+                            let _isl_info = sat_isl_link.get(&sat_id);
+                            let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + _isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
+                            
+                            let color = if total_speed > 50.0 {
+                                egui::Color32::from_rgb(34, 197, 94)
+                            } else if total_speed > 0.0 {
+                                egui::Color32::from_rgb(234, 179, 8)
+                            } else {
+                                egui::Color32::from_rgb(156, 163, 175)
+                            };
+
                             ui.horizontal(|ui| {
                                 let is_selected = sat_id == self.selected_satellite_id;
                                 if ui.selectable_label(is_selected, &sat_id).clicked() {
@@ -2270,106 +2362,27 @@ impl eframe::App for HydronGuiApp {
                                     ui.colored_label(color, format!("{:.1} Gbps", total_speed));
                                 });
                             });
-
-                            if let Some((gs_name, cap)) = sgl_info {
-                                ui.small(format!("  SGL: {} ({:.1} Gbps)", gs_name, cap));
-                            }
-                            if let Some((other_id, cap)) = isl_info {
-                                ui.small(format!("  ISL: {} ({:.1} Gbps)", other_id, cap));
-                            }
-                            if sgl_info.is_none() && isl_info.is_none() {
-                                ui.small("  Disconnesso");
-                            }
-                        });
-                    }
-                });
-            });
-
-            ui.separator();
-
-            let sat_telemetry = self.find_satellite(&self.selected_satellite_id).map(|s| (
-                s.mass,
-                s.inertia,
-                s.r,
-                s.v,
-                s.q,
-                s.omega,
-                s.h_rw,
-                s.orbit_type.clone(),
-            ));
-
-            if let Some((mass, inertia, r, v, q, omega, h_rw, orbit_type)) = sat_telemetry {
-                ui.heading(format!("Stato {}", self.selected_satellite_id));
-                
-                let max_spd = match orbit_type {
-                    OrbitType::LEO => self.leo_max_bitrate,
-                    OrbitType::MEO => self.meo_max_bitrate,
-                    OrbitType::GEO => self.geo_max_bitrate,
-                };
-                ui.label(format!("Velocità Max Canale: {:.0} Gbps", max_spd));
-                ui.label(format!("Massa Bus: {:.1} kg", mass));
-                ui.label(format!("Inerzia (Ix,Iy,Iz): [{:.2}, {:.2}, {:.2}] kg*m^2", inertia[0], inertia[1], inertia[2]));
-                
-                ui.collapsing("Parametri Fisici", |ui| {
-                    ui.add(egui::Slider::new(&mut self.sat_mass_input, 1.0..=500.0).text("Massa (kg)"));
-                    ui.add(egui::Slider::new(&mut self.sat_cd_input, 0.0..=4.0).text("Drag Cd"));
-                    ui.add(egui::Slider::new(&mut self.sat_cr_input, 0.0..=3.0).text("SRP Cr"));
-                    
-                    if ui.button("Applica Parametri").clicked() {
-                        let id = self.selected_satellite_id.clone();
-                        for seg in &mut self.constellation.segments {
-                            for s in &mut seg.satellites {
-                                if s.id == id {
-                                    s.mass = self.sat_mass_input;
-                                    s.cd = self.sat_cd_input;
-                                    s.cr = self.sat_cr_input;
-                                }
-                            }
                         }
-                        self.log(&format!("Updated physical params for satellite {}", id));
-                    }
+                    });
                 });
+            self.show_leo_list_hud = open;
+        }
 
-                ui.separator();
-                ui.label("Orbita (ECI):");
-                ui.label(format!("Pos: [{:.1}, {:.1}, {:.1}] km", r[0]/1000.0, r[1]/1000.0, r[2]/1000.0));
-                ui.label(format!("Vel: [{:.3}, {:.3}, {:.3}] km/s", v[0]/1000.0, v[1]/1000.0, v[2]/1000.0));
-
-                ui.separator();
-                ui.label("Atteggiamento:");
-                ui.label(format!("Quaternione Q:\n[{:.4}, {:.4}, {:.4}, {:.4}]", q[0], q[1], q[2], q[3]));
-                ui.label(format!("Vel. angolare Omega (rad/s):\n[{:.4}, {:.4}, {:.4}]", omega[0], omega[1], omega[2]));
-
-                ui.separator();
-                ui.label("Attuatori ADCS (Reaction Wheels):");
-                ui.label(format!("Momento H_rw:\n[{:.4}, {:.4}, {:.4}] Nms", h_rw[0], h_rw[1], h_rw[2]));
-
-                ui.separator();
-                ui.heading("Iniettore Disturbi ADCS");
-                ui.add(egui::Slider::new(&mut self.disturbance_val[0], -10.0..=10.0).text("Tx"));
-                ui.add(egui::Slider::new(&mut self.disturbance_val[1], -10.0..=10.0).text("Ty"));
-                ui.add(egui::Slider::new(&mut self.disturbance_val[2], -10.0..=10.0).text("Tz"));
-                if ui.button("Inietta Coppia Disturbo").clicked() {
-                    self.force_disturbance = true;
-                }
-
-                ui.separator();
-                ui.heading("Rumore Sensori");
-                ui.add(egui::Slider::new(&mut self.gyro_noise, 1e-7..=1e-3).logarithmic(true).text("Gyro"));
-                ui.add(egui::Slider::new(&mut self.mag_noise, 1e-9..=1e-5).logarithmic(true).text("Magnetom"));
-                ui.add(egui::Slider::new(&mut self.sun_noise, 1e-5..=1e-1).logarithmic(true).text("Sun Sensor"));
-                ui.add(egui::Slider::new(&mut self.st_noise, 1e-6..=1e-2).logarithmic(true).text("StarTracker"));
-
-                ui.heading("Console Telemetria e Routing");
-                ui.separator();
-            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                for log_msg in &self.logs {
-                    ui.label(log_msg);
-                }
-            });
-            }
-            
-        });
+        if self.show_logs_hud {
+            let mut open = self.show_logs_hud;
+            egui::Window::new("💻 Console di Sistema")
+                .open(&mut open)
+                .default_pos(egui::pos2(850.0, 500.0))
+                .default_size(egui::vec2(280.0, 180.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                        for log_msg in &self.logs {
+                            ui.label(log_msg);
+                        }
+                    });
+                });
+            self.show_logs_hud = open;
+        }
 
         egui::TopBottomPanel::bottom("bottom_panel").height_range(130.0..=170.0).show(ctx, |ui| {
             ui.heading("📊 Grafico Storico Throughput Stazioni di Terra");
