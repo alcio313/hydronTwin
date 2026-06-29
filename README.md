@@ -72,8 +72,8 @@ Where:
 
 1. **Clone the repository**:
    ```bash
-   git clone <repository-url>
-   cd hydron
+   git clone https://github.com/alcio313/hydronTwin.git
+   cd hydronTwin
    ```
 2. **Build the project**:
    ```bash
@@ -123,4 +123,4 @@ The application loads its default parameters from a `config.toml` file in the ro
 ---
 
 ## 🤖 Development & Credits
-This project was developed in pair programming with the **Gemini AI Coding Agent** (Google DeepMind's Advanced Agentic Coding system, *Antigravity*).
+This project was developed with the **Gemini AI Coding Agent** (Google DeepMind's Advanced Agentic Coding system, *Antigravity*).
