@@ -46,6 +46,8 @@ pub struct Satellite {
     pub inertia: [f64; 3], // Ix, Iy, Iz (kg*m^2), diagonal terms
     // Actuator states
     pub h_rw: [f64; 3], // Reaction wheels angular momentum (Nms)
+    pub is_custom: bool,
+    pub custom_color: Option<[u8; 3]>, // RGB override for custom satellites
 }
 
 #[derive(Debug, Clone)]
@@ -814,6 +816,8 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
             cr: config.leo_cr,
             inertia: [0.4, 0.4, 0.5],
             h_rw: [0.0, 0.0, 0.0],
+            is_custom: false,
+            custom_color: None,
         });
     }
 
@@ -858,6 +862,8 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
             cr: config.meo_cr,
             inertia: [1.5, 1.5, 2.0],
             h_rw: [0.0, 0.0, 0.0],
+            is_custom: false,
+            custom_color: None,
         });
     }
 
@@ -897,6 +903,8 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
             cr: config.geo_cr,
             inertia: [15.0, 15.0, 20.0],
             h_rw: [0.0, 0.0, 0.0],
+            is_custom: false,
+            custom_color: None,
         });
     }
 
@@ -977,7 +985,6 @@ pub struct HydronGuiApp {
     show_meo: bool,
     show_geo: bool,
     show_sgl: bool,
-    show_left_panel: bool,
 
     // Log list
     logs: Vec<String>,
@@ -1001,6 +1008,19 @@ pub struct HydronGuiApp {
     add_sat_cd: f64,
     add_sat_cr: f64,
 
+    // Add custom constellation inputs
+    add_const_name: String,
+    add_const_orbit_type: OrbitType,
+    add_const_num_sats: usize,
+    add_const_alt_km: f64,
+    add_const_inc_deg: f64,
+    add_const_mass: f64,
+    add_const_area: f64,
+    add_const_cd: f64,
+    add_const_cr: f64,
+    add_sat_color: [f32; 3],
+    add_const_color: [f32; 3],
+
     earth_texture: Option<egui::TextureHandle>,
     leo_max_bitrate: f64,
     meo_max_bitrate: f64,
@@ -1017,6 +1037,25 @@ impl HydronGuiApp {
         visuals.widgets.active.bg_fill = egui::Color32::from_rgb(51, 65, 85);
         visuals.window_fill = egui::Color32::from_rgb(15, 23, 42);
         cc.egui_ctx.set_visuals(visuals);
+
+        // Load NotoEmoji font for full emoji support (e.g. 🛰)
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "NotoEmoji".to_owned(),
+            egui::FontData::from_static(include_bytes!("NotoEmoji-Regular.ttf")),
+        );
+        // Append as fallback for both proportional and monospace families
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .push("NotoEmoji".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push("NotoEmoji".to_owned());
+        cc.egui_ctx.set_fonts(fonts);
 
         let constellation = create_satellites_from_config(&config);
         let ground_stations = config.stations.clone();
@@ -1063,7 +1102,6 @@ impl HydronGuiApp {
             show_meo: true,
             show_geo: true,
             show_sgl: true,
-            show_left_panel: true,
             
             logs: vec!["System Digital Twin Initialized.".to_string()],
             
@@ -1096,6 +1134,17 @@ impl HydronGuiApp {
             add_sat_area: 0.1,
             add_sat_cd: 2.2,
             add_sat_cr: 1.2,
+            add_const_name: "CustomConst".to_string(),
+            add_const_orbit_type: OrbitType::LEO,
+            add_const_num_sats: 6,
+            add_const_alt_km: 600.0,
+            add_const_inc_deg: 45.0,
+            add_const_mass: 25.0,
+            add_const_area: 0.15,
+            add_const_cd: 2.2,
+            add_const_cr: 1.2,
+            add_sat_color: [0.18, 0.83, 0.75],   // default teal
+            add_const_color: [0.91, 0.47, 0.98],  // default magenta
             earth_texture: None, // Will load below
             leo_max_bitrate: 100.0,
             meo_max_bitrate: 400.0,
@@ -1710,11 +1759,12 @@ impl eframe::App for HydronGuiApp {
             }
         }
 
-        // Add LEO SGL candidates
+        // Add LEO SGL candidates — class 0 = highest priority so direct GS link
+        // always beats a relay ISL hop for the same LEO satellite.
         for i in 0..all_sats.len() {
             let (_, type_i, _) = &all_sats[i];
             if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
-                candidate_isls.push((1, leo_best_gs_cap[i], i, usize::MAX));
+                candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
             }
         }
 
@@ -1797,17 +1847,20 @@ impl eframe::App for HydronGuiApp {
 
                 // Selectable Tab Ribbon Headers
                 ui.selectable_value(&mut self.active_tab, RibbonTab::Simulation, "💻 Simulation");
-                ui.selectable_value(&mut self.active_tab, RibbonTab::Constellation, "📡 Constellation");
+                ui.selectable_value(&mut self.active_tab, RibbonTab::Constellation, "🛰🛰️ Constellation");
                 ui.selectable_value(&mut self.active_tab, RibbonTab::Network, "📶 Network & Bitrate");
                 ui.selectable_value(&mut self.active_tab, RibbonTab::Adcs, "⚙ ADCS & Sensors");
-                ui.selectable_value(&mut self.active_tab, RibbonTab::Weather, "🌦 Weather & Stations");
+                ui.selectable_value(&mut self.active_tab, RibbonTab::Weather, "☁📡 Weather & Stations");
             });
 
             ui.separator();
 
             // Ribbon Contents Grouped in Horizontal Blocks
-            ui.horizontal(|ui| {
-                match self.active_tab {
+            egui::ScrollArea::horizontal()
+                .id_source("ribbon_scroll")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        match self.active_tab {
                     RibbonTab::Simulation => {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
@@ -1929,7 +1982,39 @@ impl eframe::App for HydronGuiApp {
                             self.config.geo_num = self.geo_num_input;
                             self.config.geo_alt_km = self.geo_alt_input;
                             self.config.geo_inc_deg = self.geo_inc_input;
+
+                            // 1. Gather all custom segments (index >= 3)
+                            let custom_segments: Vec<Segment> = if self.constellation.segments.len() > 3 {
+                                self.constellation.segments[3..].to_vec()
+                            } else {
+                                Vec::new()
+                            };
+
+                            // 2. Gather all custom satellites in standard segments (0, 1, 2)
+                            let custom_leo: Vec<Satellite> = self.constellation.segments[0].satellites.iter()
+                                .filter(|sat| sat.is_custom)
+                                .cloned()
+                                .collect();
+                            let custom_meo: Vec<Satellite> = self.constellation.segments[1].satellites.iter()
+                                .filter(|sat| sat.is_custom)
+                                .cloned()
+                                .collect();
+                            let custom_geo: Vec<Satellite> = self.constellation.segments[2].satellites.iter()
+                                .filter(|sat| sat.is_custom)
+                                .cloned()
+                                .collect();
+
+                            // 3. Recreate standard constellation
                             self.constellation = create_satellites_from_config(&self.config);
+
+                            // 4. Restore custom satellites to standard segments
+                            self.constellation.segments[0].satellites.extend(custom_leo);
+                            self.constellation.segments[1].satellites.extend(custom_meo);
+                            self.constellation.segments[2].satellites.extend(custom_geo);
+
+                            // 5. Restore custom segments
+                            self.constellation.segments.extend(custom_segments);
+
                             let mut found_any = false;
                             for seg in &self.constellation.segments {
                                 if !seg.satellites.is_empty() {
@@ -2007,6 +2092,10 @@ impl eframe::App for HydronGuiApp {
                                             ui.label("Area (m²)");
                                         });
                                     });
+                                    ui.vertical(|ui| {
+                                        ui.label("Color:");
+                                        egui::color_picker::color_edit_button_rgb(ui, &mut self.add_sat_color);
+                                    });
                                     if ui.button("➕ Add").clicked() {
                                         let r_earth = self.config.env.r_earth;
                                         let r_mag = r_earth + self.add_sat_alt_km * 1000.0;
@@ -2046,6 +2135,12 @@ impl eframe::App for HydronGuiApp {
                                                 OrbitType::GEO => [15.0, 15.0, 20.0],
                                             },
                                             h_rw: [0.0, 0.0, 0.0],
+                                            is_custom: true,
+                                            custom_color: Some([
+                                                (self.add_sat_color[0] * 255.0) as u8,
+                                                (self.add_sat_color[1] * 255.0) as u8,
+                                                (self.add_sat_color[2] * 255.0) as u8,
+                                            ]),
                                         };
 
                                         segment.satellites.push(new_sat);
@@ -2067,6 +2162,134 @@ impl eframe::App for HydronGuiApp {
                                         self.selected_satellite_id = new_id.clone();
                                         self.update_input_fields_for_selected();
                                         self.log(&format!("Added custom satellite: {}", new_id));
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("➕ ADD CUSTOM CONSTELLATION").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.add_const_name).desired_width(80.0));
+                                    
+                                    let mut type_changed = false;
+                                    if ui.radio_value(&mut self.add_const_orbit_type, OrbitType::LEO, "LEO").clicked() { type_changed = true; }
+                                    if ui.radio_value(&mut self.add_const_orbit_type, OrbitType::MEO, "MEO").clicked() { type_changed = true; }
+                                    if ui.radio_value(&mut self.add_const_orbit_type, OrbitType::GEO, "GEO").clicked() { type_changed = true; }
+
+                                    if type_changed {
+                                        match self.add_const_orbit_type {
+                                            OrbitType::LEO => {
+                                                self.add_const_alt_km = 600.0;
+                                                self.add_const_inc_deg = 45.0;
+                                                self.add_const_mass = 25.0;
+                                                self.add_const_area = 0.15;
+                                                self.add_const_cd = 2.2;
+                                                self.add_const_cr = 1.2;
+                                            }
+                                            OrbitType::MEO => {
+                                                self.add_const_alt_km = 10000.0;
+                                                self.add_const_inc_deg = 55.0;
+                                                self.add_const_mass = 50.0;
+                                                self.add_const_area = 0.25;
+                                                self.add_const_cd = 0.0;
+                                                self.add_const_cr = 1.2;
+                                            }
+                                            OrbitType::GEO => {
+                                                self.add_const_alt_km = 35786.0;
+                                                self.add_const_inc_deg = 0.0;
+                                                self.add_const_mass = 200.0;
+                                                self.add_const_area = 1.5;
+                                                self.add_const_cd = 0.0;
+                                                self.add_const_cr = 1.2;
+                                            }
+                                        }
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    let (alt_min, alt_max) = match self.add_const_orbit_type {
+                                        OrbitType::LEO => (200.0, 1200.0),
+                                        OrbitType::MEO => (5000.0, 15000.0),
+                                        OrbitType::GEO => (30000.0, 40000.0),
+                                    };
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().slider_width = 70.0;
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut self.add_const_num_sats).speed(1.0).clamp_range(1..=30));
+                                            ui.label("Sats");
+                                        });
+                                        ui.add(egui::Slider::new(&mut self.add_const_alt_km, alt_min..=alt_max).text("Alt"));
+                                        let inc_max = match self.add_const_orbit_type {
+                                            OrbitType::GEO => 90.0,
+                                            _ => 180.0,
+                                        };
+                                        ui.add(egui::Slider::new(&mut self.add_const_inc_deg, 0.0..=inc_max).text("Inc"));
+                                    });
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut self.add_const_mass).speed(1.0).clamp_range(1.0..=1000.0));
+                                            ui.label("Mass (kg)");
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::DragValue::new(&mut self.add_const_area).speed(0.01).clamp_range(0.01..=10.0));
+                                            ui.label("Area (m²)");
+                                        });
+                                    });
+                                    ui.vertical(|ui| {
+                                        ui.label("Color:");
+                                        egui::color_picker::color_edit_button_rgb(ui, &mut self.add_const_color);
+                                    });
+                                    if ui.button("➕ Create").clicked() {
+                                        let r_earth = self.config.env.r_earth;
+                                        let r_mag = r_earth + self.add_const_alt_km * 1000.0;
+                                        let v_mag = (self.config.env.mu / r_mag).sqrt();
+                                        let inc = self.add_const_inc_deg.to_radians();
+
+                                        let mut new_sats = Vec::new();
+                                        let num_sats = self.add_const_num_sats;
+                                        for k in 0..num_sats {
+                                            let u = (2.0 * std::f64::consts::PI * k as f64) / num_sats as f64;
+                                            let r_plane = [r_mag * u.cos(), r_mag * u.sin(), 0.0];
+                                            let v_plane = [-v_mag * u.sin(), v_mag * u.cos(), 0.0];
+                                            let c_i = inc.cos();
+                                            let s_i = inc.sin();
+                                            let r_eci = [r_plane[0], r_plane[1] * c_i, r_plane[1] * s_i];
+                                            let v_eci = [v_plane[0], v_plane[1] * c_i, v_plane[1] * s_i];
+
+                                            let new_id = format!("{}_{:02}", self.add_const_name, k);
+                                            new_sats.push(Satellite {
+                                                id: new_id,
+                                                orbit_type: self.add_const_orbit_type.clone(),
+                                                r: r_eci,
+                                                v: v_eci,
+                                                q: [1.0, 0.0, 0.0, 0.0],
+                                                omega: [0.0, 0.0, 0.0],
+                                                mass: self.add_const_mass,
+                                                area: self.add_const_area,
+                                                cd: self.add_const_cd,
+                                                cr: self.add_const_cr,
+                                                inertia: match self.add_const_orbit_type {
+                                                    OrbitType::LEO => [0.4, 0.4, 0.5],
+                                                    OrbitType::MEO => [1.5, 1.5, 2.0],
+                                                    OrbitType::GEO => [15.0, 15.0, 20.0],
+                                                },
+                                                h_rw: [0.0, 0.0, 0.0],
+                                                is_custom: true,
+                                                custom_color: Some([
+                                                    (self.add_const_color[0] * 255.0) as u8,
+                                                    (self.add_const_color[1] * 255.0) as u8,
+                                                    (self.add_const_color[2] * 255.0) as u8,
+                                                ]),
+                                            });
+                                        }
+
+                                        let new_segment = Segment {
+                                            orbit_type: self.add_const_orbit_type.clone(),
+                                            satellites: new_sats,
+                                        };
+                                        self.constellation.segments.push(new_segment);
+                                        self.log(&format!("Created custom constellation: {} with {} satellites", self.add_const_name, num_sats));
                                     }
                                 });
                             });
@@ -2161,25 +2384,43 @@ impl eframe::App for HydronGuiApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("WEATHER STATION OVERRIDES").strong().color(egui::Color32::LIGHT_BLUE));
-                                ui.horizontal(|ui| {
-                                    for i in 0..self.ground_stations.len() {
-                                        let name = self.ground_stations[i].name.clone();
-                                        ui.vertical(|ui| {
-                                            ui.small(&name);
-                                            ui.horizontal(|ui| {
-                                                if ui.selectable_label(self.weather_overrides[i].is_none(), "Markov").clicked() {
-                                                    self.weather_overrides[i] = None;
-                                                }
-                                                for w_idx in 0..self.atmos_model.states.len() {
-                                                    let w_name = &self.atmos_model.states[w_idx];
-                                                    if ui.selectable_label(self.weather_overrides[i] == Some(w_idx), w_name).clicked() {
-                                                        self.weather_overrides[i] = Some(w_idx);
+                                let n = self.ground_stations.len();
+                                let cols = (n as f64).sqrt().ceil() as usize;
+                                let cols = if cols == 0 { 1 } else { cols };
+
+                                egui::Grid::new("weather_grid")
+                                    .spacing([15.0, 10.0])
+                                    .show(ui, |ui| {
+                                        for i in 0..n {
+                                            let name = self.ground_stations[i].name.clone();
+                                            ui.vertical(|ui| {
+                                                ui.small(&name);
+                                                ui.horizontal(|ui| {
+                                                    let btn_markov = ui.selectable_label(self.weather_overrides[i].is_none(), "🔄");
+                                                    let btn_markov = btn_markov.on_hover_text("Markov (Dynamic Auto Weather)");
+                                                    if btn_markov.clicked() {
+                                                        self.weather_overrides[i] = None;
                                                     }
-                                                }
+                                                    for w_idx in 0..self.atmos_model.states.len() {
+                                                        let (wx_icon, wx_desc) = match w_idx {
+                                                            0 => ("☀", "Clear Sky"),
+                                                            1 => ("⛅", "Thin Clouds"),
+                                                            2 => ("☁", "Thick Clouds"),
+                                                            _ => ("☔", "Heavy Rain / Storm"),
+                                                        };
+                                                        let btn_wx = ui.selectable_label(self.weather_overrides[i] == Some(w_idx), wx_icon);
+                                                        let btn_wx = btn_wx.on_hover_text(wx_desc);
+                                                        if btn_wx.clicked() {
+                                                            self.weather_overrides[i] = Some(w_idx);
+                                                        }
+                                                    }
+                                                });
                                             });
-                                        });
-                                    }
-                                });
+                                            if (i + 1) % cols == 0 {
+                                                ui.end_row();
+                                            }
+                                        }
+                                    });
                             });
                         });
 
@@ -2190,13 +2431,42 @@ impl eframe::App for HydronGuiApp {
                                     let mut to_remove = None;
                                     for i in 0..self.ground_stations.len() {
                                         ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                let mut name_edit = self.ground_stations[i].name.clone();
-                                                if ui.text_edit_singleline(&mut name_edit).changed() {
-                                                    self.ground_stations[i].name = name_edit;
+                                            ui.group(|ui| {
+                                                ui.spacing_mut().slider_width = 80.0;
+                                                ui.horizontal(|ui| {
+                                                    let mut name_edit = self.ground_stations[i].name.clone();
+                                                    if ui.add(egui::TextEdit::singleline(&mut name_edit).desired_width(90.0)).changed() {
+                                                        self.ground_stations[i].name = name_edit;
+                                                    }
+                                                    if ui.button("↺").on_hover_text("Reset to defaults").clicked() {
+                                                        if let Some(orig) = self.config.stations.iter().find(|s| s.id == self.ground_stations[i].id) {
+                                                            self.ground_stations[i].name = orig.name.clone();
+                                                            self.ground_stations[i].lat_rad = orig.lat_rad;
+                                                            self.ground_stations[i].lon_rad = orig.lon_rad;
+                                                            self.ground_stations[i].alt_m = orig.alt_m;
+                                                        } else {
+                                                            self.ground_stations[i].name = format!("Station_{}", i);
+                                                            self.ground_stations[i].lat_rad = 0.0;
+                                                            self.ground_stations[i].lon_rad = 0.0;
+                                                            self.ground_stations[i].alt_m = 100.0;
+                                                        }
+                                                    }
+                                                    if ui.button("❌").clicked() {
+                                                        to_remove = Some(i);
+                                                    }
+                                                });
+                                                let mut lat_deg = self.ground_stations[i].lat_rad.to_degrees();
+                                                let mut lon_deg = self.ground_stations[i].lon_rad.to_degrees();
+                                                let mut alt_m = self.ground_stations[i].alt_m;
+
+                                                if ui.add(egui::Slider::new(&mut lat_deg, -90.0..=90.0).text("Lat")).changed() {
+                                                    self.ground_stations[i].lat_rad = lat_deg.to_radians();
                                                 }
-                                                if ui.button("❌").clicked() {
-                                                    to_remove = Some(i);
+                                                if ui.add(egui::Slider::new(&mut lon_deg, -180.0..=180.0).text("Lon")).changed() {
+                                                    self.ground_stations[i].lon_rad = lon_deg.to_radians();
+                                                }
+                                                if ui.add(egui::Slider::new(&mut alt_m, 0.0..=5000.0).text("Alt")).changed() {
+                                                    self.ground_stations[i].alt_m = alt_m;
                                                 }
                                             });
                                         });
@@ -2213,6 +2483,7 @@ impl eframe::App for HydronGuiApp {
                     }
                 }
             });
+        });
             ui.add_space(4.0);
         });
 
@@ -2290,9 +2561,9 @@ impl eframe::App for HydronGuiApp {
                             let weather_name = &self.atmos_model.states[gs.atmos_state];
                             let (wx_icon, wx_color) = match gs.atmos_state {
                                 0 => ("☀", egui::Color32::from_rgb(34, 197, 94)),
-                                1 => ("🌤", egui::Color32::from_rgb(234, 179, 8)),
+                                1 => ("⛅", egui::Color32::from_rgb(234, 179, 8)),
                                 2 => ("☁", egui::Color32::from_rgb(156, 163, 175)),
-                                _ => ("🌧", egui::Color32::from_rgb(239, 68, 68)),
+                                _ => ("☔", egui::Color32::from_rgb(239, 68, 68)),
                             };
                             let connected = &connected_sats_per_gs[gs_idx];
                             let total_gbps = gs_throughputs[gs_idx] as f64;
@@ -2802,7 +3073,7 @@ impl eframe::App for HydronGuiApp {
             for seg in &self.constellation.segments {
                 for sat in &seg.satellites {
                     let (sat_pos_px, rot_z) = project_3d(sat.r);
-                    satellites_screen.push((sat.id.clone(), sat.orbit_type.clone(), sat_pos_px, sat.r, rot_z));
+                    satellites_screen.push((sat.id.clone(), sat.orbit_type.clone(), sat_pos_px, sat.r, rot_z, sat.is_custom, sat.custom_color));
                 }
             }
 
@@ -2821,10 +3092,10 @@ impl eframe::App for HydronGuiApp {
                 let (id1, _, _) = &all_sats[i];
                 let (id2, _, _) = &all_sats[j];
 
-                let pos1 = satellites_screen.iter().find(|(id, _, _, _, _)| id == id1);
-                let pos2 = satellites_screen.iter().find(|(id, _, _, _, _)| id == id2);
+                let pos1 = satellites_screen.iter().find(|(id, _, _, _, _, _, _)| id == id1);
+                let pos2 = satellites_screen.iter().find(|(id, _, _, _, _, _, _)| id == id2);
 
-                if let (Some((_, _, pos1_px, _, rot_z1)), Some((_, _, pos2_px, _, rot_z2))) = (pos1, pos2) {
+                if let (Some((_, _, pos1_px, _, rot_z1, _, _)), Some((_, _, pos2_px, _, rot_z2, _, _))) = (pos1, pos2) {
                     let color = if capacity > 5.0 {
                         egui::Color32::from_rgb(34, 197, 94)
                     } else if capacity > 1.0 {
@@ -2850,7 +3121,7 @@ impl eframe::App for HydronGuiApp {
 
             // Draw active laser links between Satellites and their best Ground Station (SGL)
             if self.show_sgl {
-                for (_sat_id, _type, sat_pos_px, sat_r, sat_rot_z) in &satellites_screen {
+                for (_sat_id, _type, sat_pos_px, sat_r, sat_rot_z, _, _) in &satellites_screen {
                     let sat_max_speed = match _type {
                         OrbitType::LEO => self.leo_max_bitrate,
                         OrbitType::MEO => self.meo_max_bitrate,
@@ -2961,12 +3232,21 @@ impl eframe::App for HydronGuiApp {
                 );
             }
 
-            // Draw Satellites on top
-            for (sat_id, _type, sat_pos_px, _r, rot_z) in &satellites_screen {
-                let color = match _type {
-                    OrbitType::LEO => egui::Color32::from_rgb(56, 189, 248),
-                    OrbitType::MEO => egui::Color32::from_rgb(192, 132, 252),
-                    OrbitType::GEO => egui::Color32::from_rgb(251, 146, 60),
+            for (sat_id, _type, sat_pos_px, _r, rot_z, is_custom, custom_color) in &satellites_screen {
+                let color = if let (true, Some([r, g, b])) = (*is_custom, custom_color) {
+                    egui::Color32::from_rgb(*r, *g, *b)
+                } else if *is_custom {
+                    match _type {
+                        OrbitType::LEO => egui::Color32::from_rgb(45, 212, 191),
+                        OrbitType::MEO => egui::Color32::from_rgb(232, 121, 249),
+                        OrbitType::GEO => egui::Color32::from_rgb(248, 113, 113),
+                    }
+                } else {
+                    match _type {
+                        OrbitType::LEO => egui::Color32::from_rgb(56, 189, 248),
+                        OrbitType::MEO => egui::Color32::from_rgb(192, 132, 252),
+                        OrbitType::GEO => egui::Color32::from_rgb(251, 146, 60),
+                    }
                 };
 
                 let is_selected = *sat_id == self.selected_satellite_id;
