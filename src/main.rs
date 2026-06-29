@@ -238,6 +238,37 @@ pub fn lla_to_ecef(lat_rad: f64, lon_rad: f64, alt_m: f64) -> [f64; 3] {
     [x, y, z]
 }
 
+/// Compute azimuth (°, N=0 clockwise), elevation (°, + = above horizon), and distance (km)
+/// from observer at ECI `obs_r` (geodetic lat/lon provided for NED frame) to target at ECI `tgt_r`.
+/// `obs_lat` and `obs_lon` are in radians.
+fn az_el_dist(obs_r: [f64; 3], obs_lat: f64, obs_lon: f64, tgt_r: [f64; 3]) -> (f64, f64, f64) {
+    // Range vector in ECI
+    let dr = [tgt_r[0]-obs_r[0], tgt_r[1]-obs_r[1], tgt_r[2]-obs_r[2]];
+    let dist_m = norm(dr);
+    if dist_m < 1.0 { return (0.0, 0.0, 0.0); }
+    let dr_u = normalize(dr);
+
+    // NED unit vectors at observer (ECI, Earth assumed non-rotating for instantaneous geometry)
+    // N: north = d(obs_r_unit)/d(lat) at obs position
+    let (sin_lat, cos_lat) = (obs_lat.sin(), obs_lat.cos());
+    let (sin_lon, cos_lon) = (obs_lon.sin(), obs_lon.cos());
+    let north = [-sin_lat*cos_lon, -sin_lat*sin_lon, cos_lat];
+    let east  = [-sin_lon,          cos_lon,           0.0  ];
+    let up    = [ cos_lat*cos_lon,  cos_lat*sin_lon,  sin_lat];
+
+    let d_n = dot(dr_u, north);
+    let d_e = dot(dr_u, east);
+    let d_u = dot(dr_u, up);
+
+    let el_rad = d_u.asin();
+    let az_rad = d_e.atan2(d_n);  // atan2(E, N) → 0=North, 90=East
+
+    let az_deg = az_rad.to_degrees().rem_euclid(360.0);
+    let el_deg = el_rad.to_degrees();
+    let dist_km = dist_m / 1000.0;
+    (az_deg, el_deg, dist_km)
+}
+
 // Simple hand-rolled TOML config loader to keep the application dependency-free
 // ponytail: custom config loader that avoids external crate compilation and downloads.
 pub fn load_config<P: AsRef<Path>>(path: P) -> io::Result<Config> {
@@ -395,7 +426,14 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> io::Result<Config> {
                         "lat_deg" => station_lat = val.parse().unwrap_or(0.0),
                         "lon_deg" => station_lon = val.parse().unwrap_or(0.0),
                         "alt_m" => station_alt = val.parse().unwrap_or(0.0),
-                        "downlink_nominal_gbps" => station_cap = val.parse().unwrap_or(10.0),
+                        "downlink_nominal_gbps" => {
+                            let clean = val.replace('"', "").replace(',', "").trim().to_lowercase();
+                            station_cap = if clean == "inf" || clean == "infinity" || clean == "unlimited" {
+                                f64::INFINITY
+                            } else {
+                                clean.parse().unwrap_or(f64::INFINITY)
+                            };
+                        }
                         _ => {}
                     }
                 }
@@ -985,9 +1023,11 @@ pub struct HydronGuiApp {
     show_meo: bool,
     show_geo: bool,
     show_sgl: bool,
+    prioritize_relay: bool,
 
     // Log list
     logs: Vec<String>,
+    config_path: String,
 
     // Throughput history for bottom panel plotting
     history_time: Vec<f32>,
@@ -1102,8 +1142,10 @@ impl HydronGuiApp {
             show_meo: true,
             show_geo: true,
             show_sgl: true,
+            prioritize_relay: false,
             
             logs: vec!["System Digital Twin Initialized.".to_string()],
+            config_path: "config.toml".to_string(),
             
             selected_satellite_id: selected_id,
             dragging_satellite_id: None,
@@ -1396,11 +1438,13 @@ impl HydronGuiApp {
                 }
             }
 
-            // Add LEO SGL candidates
-            for i in 0..all_sats.len() {
-                let (_, type_i, _) = &all_sats[i];
-                if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
-                    candidate_isls.push((1, leo_best_gs_cap[i], i, usize::MAX));
+            // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
+            if !self.prioritize_relay {
+                for i in 0..all_sats.len() {
+                    let (_, type_i, _) = &all_sats[i];
+                    if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
+                        candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
+                    }
                 }
             }
 
@@ -1524,19 +1568,161 @@ impl HydronGuiApp {
                 let cos_t = best_theta.cos();
                 let sin_t = best_theta.sin();
 
-                for sat in &mut self.constellation.segments[segment_idx].satellites {
-                    let r_curr = sat.r;
-                    let v_curr = sat.v;
-                    let r_c_len = norm(r_curr);
-                    let v_c_len = norm(v_curr);
-                    if r_c_len > 0.0 && v_c_len > 0.0 {
-                        let u_rc = scale(r_curr, 1.0 / r_c_len);
-                        let u_vc = scale(v_curr, 1.0 / v_c_len);
-
-                        sat.r = add(scale(u_rc, r_c_len * cos_t), scale(u_vc, r_c_len * sin_t));
-                        sat.v = add(scale(u_vc, v_c_len * cos_t), scale(u_rc, -v_c_len * sin_t));
+                // Move only the dragged satellite (not the whole segment)
+                'outer: for seg in &mut self.constellation.segments {
+                    for sat in &mut seg.satellites {
+                        if sat.id != sat_id { continue; }
+                        let r_curr = sat.r;
+                        let v_curr = sat.v;
+                        let r_c_len = norm(r_curr);
+                        let v_c_len = norm(v_curr);
+                        if r_c_len > 0.0 && v_c_len > 0.0 {
+                            let u_rc = scale(r_curr, 1.0 / r_c_len);
+                            let u_vc = scale(v_curr, 1.0 / v_c_len);
+                            sat.r = add(scale(u_rc, r_c_len * cos_t), scale(u_vc, r_c_len * sin_t));
+                            sat.v = add(scale(u_vc, v_c_len * cos_t), scale(u_rc, -v_c_len * sin_t));
+                        }
+                        break 'outer;
                     }
                 }
+            }
+        }
+    }
+
+    fn import_config(&mut self, path: &str) -> Result<(), String> {
+        match load_config(path) {
+            Ok(new_config) => {
+                self.config = new_config;
+                // Reinitialize simulation state matching load
+                self.current_time = 0.0;
+                self.selected_satellite_id = "None".to_string();
+                self.dragging_satellite_id = None;
+                self.constellation = create_satellites_from_config(&self.config);
+                self.ground_stations = self.config.stations.clone();
+                // Find a selected satellite ID
+                for seg in &self.constellation.segments {
+                    if !seg.satellites.is_empty() {
+                        self.selected_satellite_id = seg.satellites[0].id.clone();
+                        break;
+                    }
+                }
+                self.update_input_fields_for_selected();
+                self.weather_overrides = vec![Some(0); self.ground_stations.len()];
+                self.history_stations = vec![vec![0.0f32; self.history_time.len()]; self.ground_stations.len()];
+                self.log(&format!("Configurazione importata correttamente da {}", path));
+                Ok(())
+            }
+            Err(e) => {
+                let err_msg = format!("Errore caricamento configurazione: {}", e);
+                self.log(&err_msg);
+                Err(err_msg)
+            }
+        }
+    }
+
+    fn export_config(&mut self, path: &str) -> Result<(), String> {
+        let c = &self.config;
+        let mut toml = String::new();
+        
+        toml.push_str("# ESA HydRON Digital Twin Config file\n\n");
+        toml.push_str("[constellation]\n");
+        toml.push_str(&format!("name = \"{}\"\n\n", c.name));
+        
+        toml.push_str("[constellation.leo]\n");
+        toml.push_str(&format!("num_satellites = {}\n", c.leo_num));
+        toml.push_str(&format!("altitude_km = {:.1}\n", c.leo_alt_km));
+        toml.push_str(&format!("inclination_deg = {:.4}\n", c.leo_inc_deg));
+        toml.push_str(&format!("mass_kg = {:.1}\n", c.leo_mass));
+        toml.push_str(&format!("cross_section_area_m2 = {:.4}\n", c.leo_area));
+        toml.push_str(&format!("cd = {:.2}\n", c.leo_cd));
+        toml.push_str(&format!("cr = {:.2}\n\n", c.leo_cr));
+
+        toml.push_str("[constellation.meo]\n");
+        toml.push_str(&format!("num_satellites = {}\n", c.meo_num));
+        toml.push_str(&format!("altitude_km = {:.1}\n", c.meo_alt_km));
+        toml.push_str(&format!("inclination_deg = {:.4}\n", c.meo_inc_deg));
+        let raans_str = c.meo_raans.iter().map(|v| format!("{:.1}", v)).collect::<Vec<_>>().join(", ");
+        toml.push_str(&format!("raans_deg = [{}]\n", raans_str));
+        toml.push_str(&format!("mass_kg = {:.1}\n", c.meo_mass));
+        toml.push_str(&format!("cross_section_area_m2 = {:.4}\n", c.meo_area));
+        toml.push_str(&format!("cd = {:.2}\n", c.meo_cd));
+        toml.push_str(&format!("cr = {:.2}\n\n", c.meo_cr));
+
+        toml.push_str("[constellation.geo]\n");
+        toml.push_str(&format!("num_satellites = {}\n", c.geo_num));
+        let geo_lons_str = c.geo_lons.iter().map(|v| format!("{:.1}", v)).collect::<Vec<_>>().join(", ");
+        toml.push_str(&format!("longitudes_deg = [{}]\n", geo_lons_str));
+        toml.push_str(&format!("altitude_km = {:.1}\n", c.geo_alt_km));
+        toml.push_str(&format!("inclination_deg = {:.4}\n", c.geo_inc_deg));
+        toml.push_str(&format!("mass_kg = {:.1}\n", c.geo_mass));
+        toml.push_str(&format!("cross_section_area_m2 = {:.4}\n", c.geo_area));
+        toml.push_str(&format!("cd = {:.2}\n", c.geo_cd));
+        toml.push_str(&format!("cr = {:.2}\n\n", c.geo_cr));
+
+        toml.push_str("[ground]\n\n");
+        for gs in &self.ground_stations {
+            toml.push_str("[[ground.stations]]\n");
+            toml.push_str(&format!("id = \"{}\"\n", gs.id));
+            toml.push_str(&format!("name = \"{}\"\n", gs.name));
+            toml.push_str(&format!("lat_deg = {:.4}\n", gs.lat_rad.to_degrees()));
+            toml.push_str(&format!("lon_deg = {:.4}\n", gs.lon_rad.to_degrees()));
+            toml.push_str(&format!("alt_m = {:.1}\n", gs.alt_m));
+            let cap_val = if gs.downlink_nominal_gbps.is_infinite() {
+                "\"unlimited\"".to_string()
+            } else {
+                format!("{:.1}", gs.downlink_nominal_gbps)
+            };
+            toml.push_str(&format!("downlink_nominal_gbps = {}\n\n", cap_val));
+        }
+
+        toml.push_str("[atmosphere]\n");
+        let states_str = c.atmos_states.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
+        toml.push_str(&format!("states = [{}]\n", states_str));
+        let k_str = c.atmos_k.iter().map(|v| format!("{:.2}", v)).collect::<Vec<_>>().join(", ");
+        toml.push_str(&format!("k_values_per_km = [{}]\n", k_str));
+        toml.push_str("transition_matrix = [\n");
+        for row in &c.transition_matrix {
+            let row_str = row.iter().map(|v| format!("{:.2}", v)).collect::<Vec<_>>().join(", ");
+            toml.push_str(&format!("    [{}],\n", row_str));
+        }
+        toml.push_str("]\n\n");
+
+        toml.push_str("[adcs]\n");
+        toml.push_str("rw_max_torque_nm = 0.01\n");
+        toml.push_str("rw_max_momentum_nms = 0.1\n");
+        toml.push_str("mtq_max_dipole_am2 = 0.2\n\n");
+
+        toml.push_str("[sensors]\n");
+        toml.push_str("gyro_bias_rad_s = [1e-5, 1e-5, 1e-5]\n");
+        toml.push_str("gyro_noise_rad_s = 1e-6\n");
+        toml.push_str("mag_noise_tesla = 1e-8\n");
+        toml.push_str("sun_noise_rad = 1e-3\n");
+        toml.push_str("star_tracker_noise_rad = 1e-4\n\n");
+
+        toml.push_str("[environment]\n");
+        toml.push_str(&format!("mu = {:.10e}\n", c.env.mu));
+        toml.push_str(&format!("r_earth = {:.1}\n", c.env.r_earth));
+        toml.push_str(&format!("j2 = {:.10e}\n", c.env.j2));
+        toml.push_str(&format!("rho0_500km = {:.10e}\n", c.env.rho0_500km));
+        toml.push_str(&format!("h0_km = {:.1}\n", c.env.h0_km));
+        toml.push_str(&format!("scale_height_km = {:.1}\n", c.env.scale_height_km));
+        toml.push_str(&format!("p_srp = {:.10e}\n\n", c.env.p_srp));
+
+        toml.push_str("[digital_twin]\n");
+        toml.push_str(&format!("time_step_s = {:.1}\n", c.dt_time_step));
+        toml.push_str(&format!("sim_duration_s = 86400.0\n"));
+        toml.push_str(&format!("ref_distance_isl_km = {:.1}\n", c.ref_dist_isl_km));
+        toml.push_str(&format!("ref_distance_sgl_km = {:.1}\n", c.ref_dist_sgl_km));
+
+        match std::fs::write(path, toml) {
+            Ok(_) => {
+                self.log(&format!("Configurazione esportata in {}", path));
+                Ok(())
+            }
+            Err(e) => {
+                let err_msg = format!("Errore esportazione configurazione: {}", e);
+                self.log(&err_msg);
+                Err(err_msg)
             }
         }
     }
@@ -1759,12 +1945,13 @@ impl eframe::App for HydronGuiApp {
             }
         }
 
-        // Add LEO SGL candidates — class 0 = highest priority so direct GS link
-        // always beats a relay ISL hop for the same LEO satellite.
-        for i in 0..all_sats.len() {
-            let (_, type_i, _) = &all_sats[i];
-            if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
-                candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
+        // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
+        if !self.prioritize_relay {
+            for i in 0..all_sats.len() {
+                let (_, type_i, _) = &all_sats[i];
+                if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
+                    candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
+                }
             }
         }
 
@@ -1922,11 +2109,37 @@ impl eframe::App for HydronGuiApp {
 
                         ui.group(|ui| {
                             ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("📂 CONFIGURATION").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.config_path).desired_width(120.0));
+                                    if ui.button("📥 Import").on_hover_text("Sfoglia e carica un file TOML").clicked() {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("TOML Configuration", &["toml"])
+                                            .pick_file() {
+                                            self.config_path = path.display().to_string();
+                                            let _ = self.import_config(&self.config_path.clone());
+                                        }
+                                    }
+                                    if ui.button("📤 Export").on_hover_text("Seleziona cartella e nome file per esportare").clicked() {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("TOML Configuration", &["toml"])
+                                            .set_file_name("config.toml")
+                                            .save_file() {
+                                            self.config_path = path.display().to_string();
+                                            let _ = self.export_config(&self.config_path.clone());
+                                        }
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("HUD WINDOWS").strong().color(egui::Color32::LIGHT_BLUE));
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut self.show_telemetry_hud, "Telemetry");
                                     ui.checkbox(&mut self.show_stations_hud, "Stations");
-                                    ui.checkbox(&mut self.show_leo_list_hud, "LEO Speeds");
+                                    ui.checkbox(&mut self.show_leo_list_hud, "Bitrates");
                                     ui.checkbox(&mut self.show_logs_hud, "Console Logs");
                                 });
                             });
@@ -2311,6 +2524,16 @@ impl eframe::App for HydronGuiApp {
 
                         ui.group(|ui| {
                             ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("LEO ROUTING PRIORITY").strong().color(egui::Color32::LIGHT_BLUE));
+                                ui.horizontal(|ui| {
+                                    ui.radio_value(&mut self.prioritize_relay, false, "Ground First (SGL)");
+                                    ui.radio_value(&mut self.prioritize_relay, true, "Relay Only (ISL)");
+                                });
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("MAX BITRATES").strong().color(egui::Color32::LIGHT_BLUE));
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Slider::new(&mut self.leo_max_bitrate, 10.0..=500.0).text("LEO (Gbps)"));
@@ -2544,6 +2767,38 @@ impl eframe::App for HydronGuiApp {
                         ui.small(format!("Q: [{:.4}, {:.4}, {:.4}, {:.4}]", q[0], q[1], q[2], q[3]));
                         ui.small(format!("Omega: [{:.4}, {:.4}, {:.4}] rad/s", omega[0], omega[1], omega[2]));
                         ui.small(format!("H_rw: [{:.4}, {:.4}, {:.4}] Nms", h_rw[0], h_rw[1], h_rw[2]));
+                        ui.separator();
+                        // Link geometry towards connected GS / ISL partner
+                        ui.label(egui::RichText::new("Geometria Link:").strong());
+                        let sat_id = &self.selected_satellite_id;
+                        // Find satellite ECI position
+                        if let Some(sat) = self.find_satellite(sat_id) {
+                            let sat_r_eci = sat.r;
+                            // SGL link → connected ground station
+                            if let Some((gs_name, _cap)) = sat_sgl_link.get(sat_id) {
+                                if let Some(gs) = self.ground_stations.iter().find(|g| &g.name == gs_name) {
+                                    let gs_ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                                    let gst = self.current_time * 7.292115e-5;
+                                    let rot = eci_to_ecef_matrix(gst);
+                                    let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
+                                    let gs_eci = mat_vec_mult(rot_t, gs_ecef);
+                                    let (az, el, dist) = az_el_dist(gs_eci, gs.lat_rad, gs.lon_rad + gst, sat_r_eci);
+                                    ui.small(format!("📡 GS {} → sat", gs_name));
+                                    ui.small(format!("  Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
+                                }
+                            }
+                            // ISL link → partner satellite
+                            if let Some((partner_id, _cap)) = sat_isl_link.get(sat_id) {
+                                if let Some(partner) = self.find_satellite(partner_id) {
+                                    let r_len = norm(sat_r_eci);
+                                    let sat_lat = if r_len > 0.0 { (sat_r_eci[2] / r_len).asin() } else { 0.0 };
+                                    let sat_lon = sat_r_eci[1].atan2(sat_r_eci[0]);
+                                    let (az, el, dist) = az_el_dist(sat_r_eci, sat_lat, sat_lon, partner.r);
+                                    ui.small(format!("🛰 ISL → {}", partner_id));
+                                    ui.small(format!("  Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
+                                }
+                            }
+                        }
                     }
                 });
             self.show_telemetry_hud = open;
@@ -2578,11 +2833,31 @@ impl eframe::App for HydronGuiApp {
                                 });
                                 ui.horizontal(|ui| {
                                     ui.small(format!("Throughput: {:.1} Gbps", total_gbps));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let cap_str = if gs.downlink_nominal_gbps.is_infinite() {
+                                            "Illimitata".to_string()
+                                        } else {
+                                            format!("{:.1} Gbps", gs.downlink_nominal_gbps)
+                                        };
+                                        ui.small(format!("Cap: {}", cap_str));
+                                    });
                                 });
                                 if !connected.is_empty() {
                                     ui.separator();
                                     for (sat_id, _, speed, _) in connected {
-                                        ui.small(format!("  • {}: {:.1} Gbps", sat_id, speed));
+                                        // Compute Az/El/Dist of this satellite as seen from the GS
+                                        if let Some(sat) = self.find_satellite(sat_id) {
+                                            let gst = self.current_time * 7.292115e-5;
+                                            let rot = eci_to_ecef_matrix(gst);
+                                            let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
+                                            let gs_ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                                            let gs_eci_pos = mat_vec_mult(rot_t, gs_ecef);
+                                            let (az, el, dist) = az_el_dist(gs_eci_pos, gs.lat_rad, gs.lon_rad + gst, sat.r);
+                                            ui.small(format!("  • {} {:.1} Gbps", sat_id, speed));
+                                            ui.small(format!("    Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
+                                        } else {
+                                            ui.small(format!("  • {}: {:.1} Gbps", sat_id, speed));
+                                        }
                                     }
                                 }
                             });
@@ -2594,23 +2869,23 @@ impl eframe::App for HydronGuiApp {
 
         if self.show_leo_list_hud {
             let mut open = self.show_leo_list_hud;
-            egui::Window::new("📶 Bitrate Canali LEO")
+            egui::Window::new("📶 Bitrates")
                 .open(&mut open)
                 .default_pos(egui::pos2(50.0, 480.0))
                 .default_size(egui::vec2(280.0, 200.0))
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().id_source("hud_leo_scroll").show(ui, |ui| {
-                        let mut leo_sats = Vec::new();
+                    egui::ScrollArea::vertical().id_source("hud_bitrates_scroll").show(ui, |ui| {
+                        ui.label(egui::RichText::new("SATELLITES").strong().color(egui::Color32::LIGHT_BLUE));
+                        
+                        let mut all_sats = Vec::new();
                         for seg in &self.constellation.segments {
-                            if seg.orbit_type == OrbitType::LEO {
-                                for sat in &seg.satellites {
-                                    leo_sats.push(sat.id.clone());
-                                }
+                            for sat in &seg.satellites {
+                                all_sats.push(sat.id.clone());
                             }
                         }
-                        leo_sats.sort();
+                        all_sats.sort();
 
-                        for sat_id in leo_sats {
+                        for sat_id in all_sats {
                             let sgl_info = sat_sgl_link.get(&sat_id);
                             let _isl_info = sat_isl_link.get(&sat_id);
                             let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + _isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
@@ -2629,6 +2904,26 @@ impl eframe::App for HydronGuiApp {
                                     self.selected_satellite_id = sat_id.clone();
                                     self.update_input_fields_for_selected();
                                 }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.colored_label(color, format!("{:.1} Gbps", total_speed));
+                                });
+                            });
+                        }
+
+                        ui.separator();
+                        ui.label(egui::RichText::new("GROUND STATIONS").strong().color(egui::Color32::LIGHT_BLUE));
+
+                        for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
+                            let total_speed = gs_throughputs[gs_idx] as f64;
+                            let color = if total_speed > 50.0 {
+                                egui::Color32::from_rgb(34, 197, 94)
+                            } else if total_speed > 0.0 {
+                                egui::Color32::from_rgb(234, 179, 8)
+                            } else {
+                                egui::Color32::from_rgb(156, 163, 175)
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(&gs.name);
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.colored_label(color, format!("{:.1} Gbps", total_speed));
                                 });
@@ -3122,6 +3417,9 @@ impl eframe::App for HydronGuiApp {
             // Draw active laser links between Satellites and their best Ground Station (SGL)
             if self.show_sgl {
                 for (_sat_id, _type, sat_pos_px, sat_r, sat_rot_z, _, _) in &satellites_screen {
+                    if self.prioritize_relay && _type == &OrbitType::LEO {
+                        continue;
+                    }
                     let sat_max_speed = match _type {
                         OrbitType::LEO => self.leo_max_bitrate,
                         OrbitType::MEO => self.meo_max_bitrate,
@@ -3308,7 +3606,7 @@ impl eframe::App for HydronGuiApp {
                 lat_rad: 0.0,
                 lon_rad: 0.0,
                 alt_m: 100.0,
-                downlink_nominal_gbps: 10.0,
+                downlink_nominal_gbps: f64::INFINITY,
                 atmos_state: 0,
                 k_value: self.config.atmos_k[0] / 1000.0,
             });
@@ -3371,9 +3669,10 @@ fn main() -> Result<(), eframe::Error> {
                 geo_cd: 0.0,
                 geo_cr: 1.2,
                 stations: vec![
-                    GroundStation { id: "GS_SVA".to_string(), name: "Svalbard".to_string(), lat_rad: 78.2307f64.to_radians(), lon_rad: 15.6472f64.to_radians(), alt_m: 130.0, downlink_nominal_gbps: 10.0, atmos_state: 0, k_value: 0.05 / 1000.0 },
-                    GroundStation { id: "GS_ZRH".to_string(), name: "Zurich".to_string(), lat_rad: 47.4647f64.to_radians(), lon_rad:  8.5492f64.to_radians(), alt_m: 400.0, downlink_nominal_gbps: 10.0, atmos_state: 0, k_value: 0.05 / 1000.0 },
-                    GroundStation { id: "GS_REU".to_string(), name: "Reunion".to_string(), lat_rad: -20.9089f64.to_radians(), lon_rad: 55.5136f64.to_radians(), alt_m: 95.0, downlink_nominal_gbps: 10.0, atmos_state: 0, k_value: 0.05 / 1000.0 },
+                    GroundStation { id: "GS_SVA".to_string(), name: "Svalbard".to_string(), lat_rad: 78.2307f64.to_radians(), lon_rad: 15.6472f64.to_radians(), alt_m: 130.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+                    GroundStation { id: "GS_ZRH".to_string(), name: "Zurich".to_string(), lat_rad: 47.4647f64.to_radians(), lon_rad:  8.5492f64.to_radians(), alt_m: 400.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+                    GroundStation { id: "GS_REU".to_string(), name: "Reunion".to_string(), lat_rad: -20.9089f64.to_radians(), lon_rad: 55.5136f64.to_radians(), alt_m: 95.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+                    GroundStation { id: "GS_MAU".to_string(), name: "Maui".to_string(), lat_rad: 20.7067f64.to_radians(), lon_rad: -156.257f64.to_radians(), alt_m: 100.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
                 ],
                 atmos_states: vec!["clear".to_string(), "thin".to_string(), "thick".to_string(), "heavy".to_string()],
                 atmos_k: vec![0.05, 0.2, 1.5, 5.0],
