@@ -17,6 +17,10 @@ Developed in Rust using the `egui` immediate-mode GUI framework, this project im
 ### 2. Network Link Capacity & Routing Simulation
 * **Ground-to-Satellite Links (SGL)**: Simulates atmospheric attenuation on laser links between satellites and ground stations using an exponential atmospheric model and slant-path angles.
 * **Inter-Satellite Links (ISL)**: Simulates laser links between adjacent satellites.
+* **Laser Link Routing Rule**: Enforces that the only active laser links permitted are those pointing directly to the ground (SGL) or those connecting a satellite to a ground-connected satellite relay (meaning at least one of the endpoints in an ISL must have an active SGL connection). Additionally, any GEO satellite involved in an ISL link must itself have a direct active connection to a ground station (SGL).
+* **Dynamic Relay Bottleneck & Handoff**: The capacity of an ISL link is capped by the active SGL ground connection capacity of its relay satellite. If the relay's ground connection speed degrades (e.g., due to atmospheric weather degradation at its ground station), the bottleneck triggers a dynamic handoff, allowing satellites to switch to a faster ground-connected relay.
+* **LEO Satellite Laser Terminal Budget**: LEO satellites are restricted to at most 1 active laser connection at any given time (either a single SGL link to ground OR a single ISL link to another satellite).
+* **LEO Connection Path Optimization**: LEO satellites dynamically select the fastest overall path to ground (either direct SGL or via a MEO/GEO relay) by comparing all SGL and ISL capacities in a single unified greedy optimization.
 * **LEO Capacity Overrides**: Inter-satellite links involving at least one LEO satellite operate at a dynamically configured, stable capacity (bypassing free-space path loss attenuation) to simulate advanced laser terminals.
 * **Real-Time Telemetry Panels**:
   * **LEO Throughput Panel**: A collapsible panel displaying live SGL and ISL throughput for LEO satellites, with selectable list entries.

@@ -1213,10 +1213,15 @@ impl HydronGuiApp {
             let mut active_sgl_links = 0;
             let mut active_isl_links = 0;
 
-            let mut leo_has_sgl = std::collections::HashSet::new();
+            let mut sat_has_sgl = std::collections::HashSet::new();
+            let mut sat_sgl_link = std::collections::HashMap::new();
+
+            // Track best SGL for LEO satellites
+            let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
+            let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
 
             // SGL links capacity
-            for (sat_id, orbit_type, sat_r) in &all_sats {
+            for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
                 let sat_max = match orbit_type {
                     OrbitType::LEO => self.leo_max_bitrate,
                     OrbitType::MEO => self.meo_max_bitrate,
@@ -1243,11 +1248,16 @@ impl HydronGuiApp {
                 }
 
                 if best_idx < ground_stations.len() && best_cap > 0.0 {
-                    gs_throughputs[best_idx] += best_cap;
-                    total_throughput += best_cap;
-                    active_sgl_links += 1;
-                    if *orbit_type == OrbitType::LEO {
-                        leo_has_sgl.insert(sat_id.clone());
+                    if orbit_type == &OrbitType::LEO {
+                        leo_best_gs[sat_idx] = best_idx;
+                        leo_best_gs_cap[sat_idx] = best_cap;
+                    } else {
+                        // MEO and GEO SGL links are allocated immediately
+                        gs_throughputs[best_idx] += best_cap;
+                        total_throughput += best_cap;
+                        active_sgl_links += 1;
+                        sat_has_sgl.insert(sat_id.clone());
+                        sat_sgl_link.insert(sat_id.clone(), best_cap);
                     }
                 }
             }
@@ -1261,10 +1271,17 @@ impl HydronGuiApp {
                     let (id1, type1, r1) = &all_sats[i];
                     let (id2, type2, r2) = &all_sats[j];
 
-                    let is_leo_gs_vis = (type1 == &OrbitType::LEO && leo_has_sgl.contains(id1))
-                        || (type2 == &OrbitType::LEO && leo_has_sgl.contains(id2));
+                    let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
+                    let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
+                    let mut is_allowed = id1_has_sgl || id2_has_sgl;
+                    if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
+                        is_allowed = false;
+                    }
+                    if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
+                        is_allowed = false;
+                    }
 
-                    if !is_leo_gs_vis && visible(*r1, *r2, self.config.env.r_earth) {
+                    if is_allowed && visible(*r1, *r2, self.config.env.r_earth) {
                         let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
                         let capacity = if is_leo {
                             self.leo_max_bitrate
@@ -1287,6 +1304,17 @@ impl HydronGuiApp {
                             };
                             compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
                         };
+                        let mut capacity = capacity;
+                        let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).copied().unwrap_or(0.0) };
+                        let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).copied().unwrap_or(0.0) };
+
+                        if id1_has_sgl && id2_has_sgl {
+                            capacity = capacity.min(cap1.max(cap2));
+                        } else if id1_has_sgl {
+                            capacity = capacity.min(cap1);
+                        } else if id2_has_sgl {
+                            capacity = capacity.min(cap2);
+                        }
                         if capacity > 0.0 {
                             let class = match (type1, type2) {
                                 (OrbitType::LEO, OrbitType::LEO) => 2,
@@ -1299,6 +1327,14 @@ impl HydronGuiApp {
                 }
             }
 
+            // Add LEO SGL candidates
+            for i in 0..all_sats.len() {
+                let (_, type_i, _) = &all_sats[i];
+                if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
+                    candidate_isls.push((1, leo_best_gs_cap[i], i, usize::MAX));
+                }
+            }
+
             candidate_isls.sort_by(|a, b| {
                 a.0.cmp(&b.0) // class ascending
                     .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)) // capacity descending
@@ -1307,25 +1343,40 @@ impl HydronGuiApp {
             });
 
             let mut leo_isl_count = std::collections::HashMap::new();
-            for (_class, _capacity, i, j) in candidate_isls {
+            for (_class, capacity, i, j) in candidate_isls {
                 let (id1, type1, _) = &all_sats[i];
-                let (id2, type2, _) = &all_sats[j];
 
-                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-
-                if type1 == &OrbitType::LEO {
+                if j == usize::MAX {
+                    if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                        continue;
+                    }
                     *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-                }
-                if type2 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
-                }
 
-                active_isl_links += 1;
+                    let gs_idx = leo_best_gs[i];
+                    gs_throughputs[gs_idx] += capacity;
+                    total_throughput += capacity;
+                    active_sgl_links += 1;
+                    sat_has_sgl.insert(id1.clone());
+                    sat_sgl_link.insert(id1.clone(), capacity);
+                } else {
+                    let (id2, type2, _) = &all_sats[j];
+
+                    if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                        continue;
+                    }
+                    if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                        continue;
+                    }
+
+                    if type1 == &OrbitType::LEO {
+                        *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                    }
+                    if type2 == &OrbitType::LEO {
+                        *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                    }
+
+                    active_isl_links += 1;
+                }
             }
 
             // Write CSV row
@@ -1512,7 +1563,11 @@ impl eframe::App for HydronGuiApp {
         let mut gs_throughputs = vec![0.0f32; self.ground_stations.len()];
         let mut total_throughput = 0.0f32;
 
-        for (sat_id, orbit_type, sat_r) in &all_sats {
+        // Track best SGL for LEO satellites
+        let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
+        let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
+
+        for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
             let sat_max = match orbit_type {
                 OrbitType::LEO => self.leo_max_bitrate,
                 OrbitType::MEO => self.meo_max_bitrate,
@@ -1544,9 +1599,14 @@ impl eframe::App for HydronGuiApp {
             }
 
             if best_idx < self.ground_stations.len() && best_cap > 0.0 {
-                connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_label, best_cap, sat_max));
-                gs_throughputs[best_idx] += best_cap as f32;
-                total_throughput += best_cap as f32;
+                if orbit_type == &OrbitType::LEO {
+                    leo_best_gs[sat_idx] = best_idx;
+                    leo_best_gs_cap[sat_idx] = best_cap;
+                } else {
+                    connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_label, best_cap, sat_max));
+                    gs_throughputs[best_idx] += best_cap as f32;
+                    total_throughput += best_cap as f32;
+                }
             }
         }
 
@@ -1567,15 +1627,22 @@ impl eframe::App for HydronGuiApp {
                 let (id1, type1, r1) = &all_sats[i];
                 let (id2, type2, r2) = &all_sats[j];
 
-                let is_leo_gs_vis = (type1 == &OrbitType::LEO && sat_has_sgl.contains(id1))
-                    || (type2 == &OrbitType::LEO && sat_has_sgl.contains(id2));
+                let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
+                let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
+                let mut is_allowed = id1_has_sgl || id2_has_sgl;
+                if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
+                    is_allowed = false;
+                }
+                if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
+                    is_allowed = false;
+                }
 
                 let show_link = match (type1, type2) {
                     (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
                     (OrbitType::MEO, OrbitType::MEO) => self.show_meo,
                     (OrbitType::GEO, OrbitType::GEO) => self.show_geo,
                     _ => self.show_meo || self.show_geo || self.show_leo,
-                } && !is_leo_gs_vis;
+                } && is_allowed;
 
                 if show_link && visible(*r1, *r2, self.config.env.r_earth) {
                     let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
@@ -1600,6 +1667,17 @@ impl eframe::App for HydronGuiApp {
                         };
                         compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
                     };
+                    let mut capacity = capacity;
+                    let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).map(|x| x.1).unwrap_or(0.0) };
+                    let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).map(|x| x.1).unwrap_or(0.0) };
+
+                    if id1_has_sgl && id2_has_sgl {
+                        capacity = capacity.min(cap1.max(cap2));
+                    } else if id1_has_sgl {
+                        capacity = capacity.min(cap1);
+                    } else if id2_has_sgl {
+                        capacity = capacity.min(cap2);
+                    }
                     if capacity > 0.0 {
                         let class = match (type1, type2) {
                             (OrbitType::LEO, OrbitType::LEO) => 2,
@@ -1609,6 +1687,14 @@ impl eframe::App for HydronGuiApp {
                         candidate_isls.push((class, capacity, i, j));
                     }
                 }
+            }
+        }
+
+        // Add LEO SGL candidates
+        for i in 0..all_sats.len() {
+            let (_, type_i, _) = &all_sats[i];
+            if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
+                candidate_isls.push((1, leo_best_gs_cap[i], i, usize::MAX));
             }
         }
 
@@ -1625,25 +1711,41 @@ impl eframe::App for HydronGuiApp {
 
         for (_class, capacity, i, j) in candidate_isls {
             let (id1, type1, _) = &all_sats[i];
-            let (id2, type2, _) = &all_sats[j];
 
-            if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                continue;
-            }
-            if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
-                continue;
-            }
-
-            if type1 == &OrbitType::LEO {
+            if j == usize::MAX {
+                if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
                 *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-            }
-            if type2 == &OrbitType::LEO {
-                *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
-            }
 
-            active_isls.push((i, j, capacity));
-            sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
-            sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
+                let gs_idx = leo_best_gs[i];
+                let gs_name = &self.ground_stations[gs_idx].name;
+                connected_sats_per_gs[gs_idx].push((id1.clone(), "LEO", capacity, self.leo_max_bitrate));
+                gs_throughputs[gs_idx] += capacity as f32;
+                total_throughput += capacity as f32;
+                sat_has_sgl.insert(id1.clone());
+                sat_sgl_link.insert(id1.clone(), (gs_name.clone(), capacity));
+            } else {
+                let (id2, type2, _) = &all_sats[j];
+
+                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
+                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
+
+                if type1 == &OrbitType::LEO {
+                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                }
+                if type2 == &OrbitType::LEO {
+                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                }
+
+                active_isls.push((i, j, capacity));
+                sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
+                sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
+            }
         }
 
         // Update history if running
