@@ -926,6 +926,7 @@ pub struct HydronGuiApp {
 
     // Selection
     selected_satellite_id: String,
+    dragging_satellite_id: Option<String>,
 
     // Form inputs for dynamic configuration edits
     leo_num_input: usize,
@@ -976,7 +977,19 @@ pub struct HydronGuiApp {
     map_yaw: f32,
     map_zoom: f32,
 
+    // Add satellite form inputs
+    add_sat_orbit_type: OrbitType,
+    add_sat_alt_km: f64,
+    add_sat_inc_deg: f64,
+    add_sat_mass: f64,
+    add_sat_area: f64,
+    add_sat_cd: f64,
+    add_sat_cr: f64,
+
     earth_texture: Option<egui::TextureHandle>,
+    leo_max_bitrate: f64,
+    meo_max_bitrate: f64,
+    geo_max_bitrate: f64,
 }
 
 impl HydronGuiApp {
@@ -1035,6 +1048,7 @@ impl HydronGuiApp {
             logs: vec!["System Digital Twin Initialized.".to_string()],
             
             selected_satellite_id: selected_id,
+            dragging_satellite_id: None,
             constellation,
             ground_stations: ground_stations.clone(),
             atmos_model: AtmosphereModel {
@@ -1055,7 +1069,17 @@ impl HydronGuiApp {
             map_pitch: 0.4,
             map_yaw: 0.6,
             map_zoom: 1.0,
+            add_sat_orbit_type: OrbitType::LEO,
+            add_sat_alt_km: 550.0,
+            add_sat_inc_deg: 97.6,
+            add_sat_mass: 20.0,
+            add_sat_area: 0.1,
+            add_sat_cd: 2.2,
+            add_sat_cr: 1.2,
             earth_texture: None, // Will load below
+            leo_max_bitrate: 100.0,
+            meo_max_bitrate: 400.0,
+            geo_max_bitrate: 800.0,
         };
 
         // Load Earth texture map
@@ -1189,12 +1213,14 @@ impl HydronGuiApp {
             let mut active_sgl_links = 0;
             let mut active_isl_links = 0;
 
+            let mut leo_has_sgl = std::collections::HashSet::new();
+
             // SGL links capacity
-            for (_sat_id, orbit_type, sat_r) in &all_sats {
+            for (sat_id, orbit_type, sat_r) in &all_sats {
                 let sat_max = match orbit_type {
-                    OrbitType::LEO => 100.0_f64,
-                    OrbitType::MEO => 400.0_f64,
-                    OrbitType::GEO => 800.0_f64,
+                    OrbitType::LEO => self.leo_max_bitrate,
+                    OrbitType::MEO => self.meo_max_bitrate,
+                    OrbitType::GEO => self.geo_max_bitrate,
                 };
                 let sat_ref_dist = match orbit_type {
                     OrbitType::LEO => self.config.ref_dist_sgl_km,
@@ -1220,38 +1246,86 @@ impl HydronGuiApp {
                     gs_throughputs[best_idx] += best_cap;
                     total_throughput += best_cap;
                     active_sgl_links += 1;
+                    if *orbit_type == OrbitType::LEO {
+                        leo_has_sgl.insert(sat_id.clone());
+                    }
                 }
             }
 
             // ISL links
+            // ponytail: greedy satellite link allocation. Limits LEO satellites to 1 connection.
+            // O(N^2 log N) sort of candidates, which is fine for small constellations (<100 satellites).
+            let mut candidate_isls = Vec::new();
             for i in 0..all_sats.len() {
                 for j in (i + 1)..all_sats.len() {
-                    let (_id1, type1, r1) = &all_sats[i];
-                    let (_id2, type2, r2) = &all_sats[j];
+                    let (id1, type1, r1) = &all_sats[i];
+                    let (id2, type2, r2) = &all_sats[j];
 
-                    if visible(*r1, *r2, self.config.env.r_earth) {
-                        let sat_max1 = match type1 {
-                            OrbitType::LEO => 100.0_f64,
-                            OrbitType::MEO => 400.0_f64,
-                            OrbitType::GEO => 800.0_f64,
+                    let is_leo_gs_vis = (type1 == &OrbitType::LEO && leo_has_sgl.contains(id1))
+                        || (type2 == &OrbitType::LEO && leo_has_sgl.contains(id2));
+
+                    if !is_leo_gs_vis && visible(*r1, *r2, self.config.env.r_earth) {
+                        let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
+                        let capacity = if is_leo {
+                            self.leo_max_bitrate
+                        } else {
+                            let sat_max1 = match type1 {
+                                OrbitType::LEO => self.leo_max_bitrate,
+                                OrbitType::MEO => self.meo_max_bitrate,
+                                OrbitType::GEO => self.geo_max_bitrate,
+                            };
+                            let sat_max2 = match type2 {
+                                OrbitType::LEO => self.leo_max_bitrate,
+                                OrbitType::MEO => self.meo_max_bitrate,
+                                OrbitType::GEO => self.geo_max_bitrate,
+                            };
+                            let nominal_capacity = sat_max1.min(sat_max2);
+                            let sat_ref_dist = match type1 {
+                                OrbitType::LEO => self.config.ref_dist_isl_km,
+                                OrbitType::MEO => self.config.meo_alt_km,
+                                OrbitType::GEO => self.config.geo_alt_km,
+                            };
+                            compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
                         };
-                        let sat_max2 = match type2 {
-                            OrbitType::LEO => 100.0_f64,
-                            OrbitType::MEO => 400.0_f64,
-                            OrbitType::GEO => 800.0_f64,
-                        };
-                        let nominal_capacity = sat_max1.min(sat_max2);
-                        let sat_ref_dist = match type1 {
-                            OrbitType::LEO => self.config.ref_dist_isl_km,
-                            OrbitType::MEO => self.config.meo_alt_km,
-                            OrbitType::GEO => self.config.geo_alt_km,
-                        };
-                        let capacity = compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env);
                         if capacity > 0.0 {
-                            active_isl_links += 1;
+                            let class = match (type1, type2) {
+                                (OrbitType::LEO, OrbitType::LEO) => 2,
+                                (OrbitType::LEO, _) | (_, OrbitType::LEO) => 1,
+                                _ => 0,
+                            };
+                            candidate_isls.push((class, capacity, i, j));
                         }
                     }
                 }
+            }
+
+            candidate_isls.sort_by(|a, b| {
+                a.0.cmp(&b.0) // class ascending
+                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)) // capacity descending
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.3.cmp(&b.3))
+            });
+
+            let mut leo_isl_count = std::collections::HashMap::new();
+            for (_class, _capacity, i, j) in candidate_isls {
+                let (id1, type1, _) = &all_sats[i];
+                let (id2, type2, _) = &all_sats[j];
+
+                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
+                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
+
+                if type1 == &OrbitType::LEO {
+                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                }
+                if type2 == &OrbitType::LEO {
+                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                }
+
+                active_isl_links += 1;
             }
 
             // Write CSV row
@@ -1266,6 +1340,85 @@ impl HydronGuiApp {
         }
 
         Ok(filename.to_string())
+    }
+
+    fn drag_satellite_to(&mut self, sat_id: &str, mouse_pos: egui::Pos2, center: egui::Pos2, scale_factor: f64) {
+        let mut target_sat_pos = None;
+        let mut target_sat_vel = None;
+        let mut segment_idx = usize::MAX;
+        
+        for (seg_i, seg) in self.constellation.segments.iter().enumerate() {
+            for sat in &seg.satellites {
+                if sat.id == *sat_id {
+                    target_sat_pos = Some(sat.r);
+                    target_sat_vel = Some(sat.v);
+                    segment_idx = seg_i;
+                    break;
+                }
+            }
+            if segment_idx != usize::MAX {
+                break;
+            }
+        }
+
+        if let (Some(r), Some(v), true) = (target_sat_pos, target_sat_vel, segment_idx < self.constellation.segments.len()) {
+            let r_len = norm(r);
+            let v_len = norm(v);
+            if r_len > 0.0 && v_len > 0.0 {
+                let u_r = scale(r, 1.0 / r_len);
+                let u_v = scale(v, 1.0 / v_len);
+
+                let cos_yaw = (self.map_yaw as f64).cos();
+                let sin_yaw = (self.map_yaw as f64).sin();
+                let cos_pitch = (self.map_pitch as f64).cos();
+                let sin_pitch = (self.map_pitch as f64).sin();
+
+                let project_pos = |pos: [f64; 3]| -> egui::Pos2 {
+                    let x = pos[0];
+                    let y = -pos[1];
+                    let z = pos[2];
+                    let x1 = x * cos_yaw - z * sin_yaw;
+                    let z1 = x * sin_yaw + z * cos_yaw;
+                    let y2 = y * cos_pitch - z1 * sin_pitch;
+                    egui::pos2(
+                        center.x + (x1 * scale_factor) as f32,
+                        center.y + (y2 * scale_factor) as f32,
+                    )
+                };
+
+                let mut best_theta = 0.0;
+                let mut min_dist = f32::MAX;
+
+                let steps = 120;
+                for step in 0..steps {
+                    let theta = (step as f64 * 2.0 * std::f64::consts::PI) / (steps as f64);
+                    let r_sample = add(scale(u_r, r_len * theta.cos()), scale(u_v, r_len * theta.sin()));
+                    let screen_pos = project_pos(r_sample);
+                    let dist = screen_pos.distance(mouse_pos);
+                    if dist < min_dist {
+                        min_dist = dist;
+                        best_theta = theta;
+                    }
+                }
+
+                let cos_t = best_theta.cos();
+                let sin_t = best_theta.sin();
+
+                for sat in &mut self.constellation.segments[segment_idx].satellites {
+                    let r_curr = sat.r;
+                    let v_curr = sat.v;
+                    let r_c_len = norm(r_curr);
+                    let v_c_len = norm(v_curr);
+                    if r_c_len > 0.0 && v_c_len > 0.0 {
+                        let u_rc = scale(r_curr, 1.0 / r_c_len);
+                        let u_vc = scale(v_curr, 1.0 / v_c_len);
+
+                        sat.r = add(scale(u_rc, r_c_len * cos_t), scale(u_vc, r_c_len * sin_t));
+                        sat.v = add(scale(u_vc, v_c_len * cos_t), scale(u_rc, -v_c_len * sin_t));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1361,9 +1514,9 @@ impl eframe::App for HydronGuiApp {
 
         for (sat_id, orbit_type, sat_r) in &all_sats {
             let sat_max = match orbit_type {
-                OrbitType::LEO => 100.0_f64,
-                OrbitType::MEO => 400.0_f64,
-                OrbitType::GEO => 800.0_f64,
+                OrbitType::LEO => self.leo_max_bitrate,
+                OrbitType::MEO => self.meo_max_bitrate,
+                OrbitType::GEO => self.geo_max_bitrate,
             };
             let sat_ref_dist = match orbit_type {
                 OrbitType::LEO => self.config.ref_dist_sgl_km,
@@ -1395,6 +1548,102 @@ impl eframe::App for HydronGuiApp {
                 gs_throughputs[best_idx] += best_cap as f32;
                 total_throughput += best_cap as f32;
             }
+        }
+
+        let mut sat_has_sgl = std::collections::HashSet::new();
+        let mut sat_sgl_link = std::collections::HashMap::new();
+        for (gs_idx, gs_conn) in connected_sats_per_gs.iter().enumerate() {
+            let gs_name = &self.ground_stations[gs_idx].name;
+            for (sat_id, _, cap, _) in gs_conn {
+                sat_has_sgl.insert(sat_id.clone());
+                sat_sgl_link.insert(sat_id.clone(), (gs_name.clone(), *cap));
+            }
+        }
+
+        // Pre-calculate active ISL links
+        let mut candidate_isls = Vec::new();
+        for i in 0..all_sats.len() {
+            for j in (i + 1)..all_sats.len() {
+                let (id1, type1, r1) = &all_sats[i];
+                let (id2, type2, r2) = &all_sats[j];
+
+                let is_leo_gs_vis = (type1 == &OrbitType::LEO && sat_has_sgl.contains(id1))
+                    || (type2 == &OrbitType::LEO && sat_has_sgl.contains(id2));
+
+                let show_link = match (type1, type2) {
+                    (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
+                    (OrbitType::MEO, OrbitType::MEO) => self.show_meo,
+                    (OrbitType::GEO, OrbitType::GEO) => self.show_geo,
+                    _ => self.show_meo || self.show_geo || self.show_leo,
+                } && !is_leo_gs_vis;
+
+                if show_link && visible(*r1, *r2, self.config.env.r_earth) {
+                    let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
+                    let capacity = if is_leo {
+                        self.leo_max_bitrate
+                    } else {
+                        let sat_max1 = match type1 {
+                            OrbitType::LEO => self.leo_max_bitrate,
+                            OrbitType::MEO => self.meo_max_bitrate,
+                            OrbitType::GEO => self.geo_max_bitrate,
+                        };
+                        let sat_max2 = match type2 {
+                            OrbitType::LEO => self.leo_max_bitrate,
+                            OrbitType::MEO => self.meo_max_bitrate,
+                            OrbitType::GEO => self.geo_max_bitrate,
+                        };
+                        let nominal_capacity = sat_max1.min(sat_max2);
+                        let sat_ref_dist = match type1 {
+                            OrbitType::LEO => self.config.ref_dist_isl_km,
+                            OrbitType::MEO => self.config.meo_alt_km,
+                            OrbitType::GEO => self.config.geo_alt_km,
+                        };
+                        compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
+                    };
+                    if capacity > 0.0 {
+                        let class = match (type1, type2) {
+                            (OrbitType::LEO, OrbitType::LEO) => 2,
+                            (OrbitType::LEO, _) | (_, OrbitType::LEO) => 1,
+                            _ => 0,
+                        };
+                        candidate_isls.push((class, capacity, i, j));
+                    }
+                }
+            }
+        }
+
+        candidate_isls.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+
+        let mut leo_isl_count = std::collections::HashMap::new();
+        let mut active_isls = Vec::new();
+        let mut sat_isl_link = std::collections::HashMap::new();
+
+        for (_class, capacity, i, j) in candidate_isls {
+            let (id1, type1, _) = &all_sats[i];
+            let (id2, type2, _) = &all_sats[j];
+
+            if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                continue;
+            }
+            if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                continue;
+            }
+
+            if type1 == &OrbitType::LEO {
+                *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+            }
+            if type2 == &OrbitType::LEO {
+                *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+            }
+
+            active_isls.push((i, j, capacity));
+            sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
+            sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
         }
 
         // Update history if running
@@ -1488,6 +1737,13 @@ impl eframe::App for HydronGuiApp {
                 });
 
                 ui.separator();
+                ui.collapsing("📶 Bitrate Massimo Satelliti", |ui| {
+                    ui.add(egui::Slider::new(&mut self.leo_max_bitrate, 10.0..=500.0).text("LEO (Gbps)"));
+                    ui.add(egui::Slider::new(&mut self.meo_max_bitrate, 50.0..=2000.0).text("MEO (Gbps)"));
+                    ui.add(egui::Slider::new(&mut self.geo_max_bitrate, 100.0..=5000.0).text("GEO (Gbps)"));
+                });
+
+                ui.separator();
                 ui.collapsing("📡 Modifica Costellazione", |ui| {
                     ui.collapsing("Parametri Segmenti", |ui| {
                         ui.label("Segmento LEO:");
@@ -1544,6 +1800,147 @@ impl eframe::App for HydronGuiApp {
                             
                             self.update_input_fields_for_selected();
                             self.log("Constellation reconfigured dynamically");
+                        }
+
+                        ui.separator();
+                        ui.label("➕ Aggiungi Singolo Satellite:");
+                        let mut type_changed = false;
+                        ui.horizontal(|ui| {
+                            if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::LEO, "LEO").clicked() { type_changed = true; }
+                            if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::MEO, "MEO").clicked() { type_changed = true; }
+                            if ui.radio_value(&mut self.add_sat_orbit_type, OrbitType::GEO, "GEO").clicked() { type_changed = true; }
+                        });
+                        
+                        if type_changed {
+                            match self.add_sat_orbit_type {
+                                OrbitType::LEO => {
+                                    self.add_sat_alt_km = 550.0;
+                                    self.add_sat_inc_deg = 97.6;
+                                    self.add_sat_mass = 20.0;
+                                    self.add_sat_area = 0.1;
+                                    self.add_sat_cd = 2.2;
+                                    self.add_sat_cr = 1.2;
+                                }
+                                OrbitType::MEO => {
+                                    self.add_sat_alt_km = 10000.0;
+                                    self.add_sat_inc_deg = 55.0;
+                                    self.add_sat_mass = 50.0;
+                                    self.add_sat_area = 0.25;
+                                    self.add_sat_cd = 0.0;
+                                    self.add_sat_cr = 1.2;
+                                }
+                                OrbitType::GEO => {
+                                    self.add_sat_alt_km = 35786.0;
+                                    self.add_sat_inc_deg = 0.0;
+                                    self.add_sat_mass = 200.0;
+                                    self.add_sat_area = 1.5;
+                                    self.add_sat_cd = 0.0;
+                                    self.add_sat_cr = 1.2;
+                                }
+                            }
+                        }
+
+                        let (alt_min, alt_max) = match self.add_sat_orbit_type {
+                            OrbitType::LEO => (200.0, 1200.0),
+                            OrbitType::MEO => (5000.0, 15000.0),
+                            OrbitType::GEO => (30000.0, 40000.0),
+                        };
+                        ui.add(egui::Slider::new(&mut self.add_sat_alt_km, alt_min..=alt_max).text("Quota (km)"));
+                        
+                        let inc_max = match self.add_sat_orbit_type {
+                            OrbitType::GEO => 90.0,
+                            _ => 180.0,
+                        };
+                        ui.add(egui::Slider::new(&mut self.add_sat_inc_deg, 0.0..=inc_max).text("Inclinazione (°)"));
+
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut self.add_sat_mass).speed(1.0).clamp_range(1.0..=1000.0));
+                            ui.label("Massa (kg)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut self.add_sat_area).speed(0.01).clamp_range(0.01..=10.0));
+                            ui.label("Area (m²)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut self.add_sat_cd).speed(0.1).clamp_range(0.0..=5.0));
+                            ui.label("Cd (Drag)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut self.add_sat_cr).speed(0.1).clamp_range(0.0..=5.0));
+                            ui.label("Cr (Rad Press)");
+                        });
+
+                        if ui.button("➕ Aggiungi Satellite").clicked() {
+                            let r_earth = self.config.env.r_earth;
+                            let r_mag = r_earth + self.add_sat_alt_km * 1000.0;
+                            let v_mag = (self.config.env.mu / r_mag).sqrt();
+                            let inc = self.add_sat_inc_deg.to_radians();
+
+                            let segment_idx = match self.add_sat_orbit_type {
+                                OrbitType::LEO => 0,
+                                OrbitType::MEO => 1,
+                                OrbitType::GEO => 2,
+                            };
+                            let segment = &mut self.constellation.segments[segment_idx];
+                            let new_id = format!("{:?}_{:02}", self.add_sat_orbit_type, segment.satellites.len());
+
+                            let u = 0.0_f64; // True anomaly 0
+                            let r_plane = [r_mag * u.cos(), r_mag * u.sin(), 0.0];
+                            let v_plane = [-v_mag * u.sin(), v_mag * u.cos(), 0.0];
+                            
+                            let c_i = inc.cos();
+                            let s_i = inc.sin();
+                            
+                            let r_eci = [
+                                r_plane[0],
+                                r_plane[1] * c_i,
+                                r_plane[1] * s_i
+                            ];
+                            let v_eci = [
+                                v_plane[0],
+                                v_plane[1] * c_i,
+                                v_plane[1] * s_i
+                            ];
+
+                            let new_sat = Satellite {
+                                id: new_id.clone(),
+                                orbit_type: self.add_sat_orbit_type.clone(),
+                                r: r_eci,
+                                v: v_eci,
+                                q: [1.0, 0.0, 0.0, 0.0],
+                                omega: [0.0, 0.0, 0.0],
+                                mass: self.add_sat_mass,
+                                area: self.add_sat_area,
+                                cd: self.add_sat_cd,
+                                cr: self.add_sat_cr,
+                                inertia: match self.add_sat_orbit_type {
+                                    OrbitType::LEO => [0.4, 0.4, 0.5],
+                                    OrbitType::MEO => [1.5, 1.5, 2.0],
+                                    OrbitType::GEO => [15.0, 15.0, 20.0],
+                                },
+                                h_rw: [0.0, 0.0, 0.0],
+                            };
+
+                            segment.satellites.push(new_sat);
+
+                            match self.add_sat_orbit_type {
+                                OrbitType::LEO => {
+                                    self.config.leo_num += 1;
+                                    self.leo_num_input = self.config.leo_num;
+                                }
+                                OrbitType::MEO => {
+                                    self.config.meo_num += 1;
+                                    self.meo_num_input = self.config.meo_num;
+                                }
+                                OrbitType::GEO => {
+                                    self.config.geo_num += 1;
+                                    self.geo_num_input = self.config.geo_num;
+                                }
+                            }
+
+                            self.selected_satellite_id = new_id.clone();
+                            self.update_input_fields_for_selected();
+                            self.log(&format!("Aggiunto satellite personalizzato: {}", new_id));
                         }
                     }); // Parametri Segmenti
 
@@ -1732,6 +2129,62 @@ impl eframe::App for HydronGuiApp {
 
             ui.separator();
 
+            ui.collapsing("📶 Bitrate Satelliti LEO", |ui| {
+                egui::ScrollArea::vertical().id_source("leo_scroll").max_height(200.0).show(ui, |ui| {
+                    let mut leo_sats = Vec::new();
+                    for seg in &self.constellation.segments {
+                        if seg.orbit_type == OrbitType::LEO {
+                            for sat in &seg.satellites {
+                                leo_sats.push(sat.id.clone());
+                            }
+                        }
+                    }
+                    leo_sats.sort();
+
+                    for sat_id in leo_sats {
+                        let sgl_info = sat_sgl_link.get(&sat_id);
+                        let isl_info = sat_isl_link.get(&sat_id);
+                        
+                        let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
+                        
+                        let color = if total_speed > 50.0 {
+                            egui::Color32::from_rgb(34, 197, 94)
+                        } else if total_speed > 10.0 {
+                            egui::Color32::from_rgb(234, 179, 8)
+                        } else if total_speed > 0.0 {
+                            egui::Color32::from_rgb(239, 68, 68)
+                        } else {
+                            egui::Color32::from_rgb(156, 163, 175)
+                        };
+
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                let is_selected = sat_id == self.selected_satellite_id;
+                                if ui.selectable_label(is_selected, &sat_id).clicked() {
+                                    self.selected_satellite_id = sat_id.clone();
+                                    self.update_input_fields_for_selected();
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.colored_label(color, format!("{:.1} Gbps", total_speed));
+                                });
+                            });
+
+                            if let Some((gs_name, cap)) = sgl_info {
+                                ui.small(format!("  SGL: {} ({:.1} Gbps)", gs_name, cap));
+                            }
+                            if let Some((other_id, cap)) = isl_info {
+                                ui.small(format!("  ISL: {} ({:.1} Gbps)", other_id, cap));
+                            }
+                            if sgl_info.is_none() && isl_info.is_none() {
+                                ui.small("  Disconnesso");
+                            }
+                        });
+                    }
+                });
+            });
+
+            ui.separator();
+
             let sat_telemetry = self.find_satellite(&self.selected_satellite_id).map(|s| (
                 s.mass,
                 s.inertia,
@@ -1747,9 +2200,9 @@ impl eframe::App for HydronGuiApp {
                 ui.heading(format!("Stato {}", self.selected_satellite_id));
                 
                 let max_spd = match orbit_type {
-                    OrbitType::LEO => 100.0,
-                    OrbitType::MEO => 400.0,
-                    OrbitType::GEO => 800.0,
+                    OrbitType::LEO => self.leo_max_bitrate,
+                    OrbitType::MEO => self.meo_max_bitrate,
+                    OrbitType::GEO => self.geo_max_bitrate,
                 };
                 ui.label(format!("Velocità Max Canale: {:.0} Gbps", max_spd));
                 ui.label(format!("Massa Bus: {:.1} kg", mass));
@@ -1953,12 +2406,6 @@ impl eframe::App for HydronGuiApp {
                 egui::Sense::drag()
             );
 
-            if response.dragged() {
-                let delta = response.drag_delta();
-                self.map_yaw += delta.x * 0.005;
-                self.map_pitch = (self.map_pitch - delta.y * 0.005).clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
-            }
-
             if response.hovered() {
                 let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll_delta != 0.0 {
@@ -1976,22 +2423,24 @@ impl eframe::App for HydronGuiApp {
             let screen_dim = rect.width().min(rect.height());
             let scale = ((screen_dim * 0.45) as f64 / max_r) * (self.map_zoom as f64);
 
+            let map_yaw = self.map_yaw;
+            let map_pitch = self.map_pitch;
             // 3D projection closure: projects [x, y, z] to screen space and returns (pos2, rotated_z)
-            let project_3d = |pos: [f64; 3]| -> (egui::Pos2, f64) {
+            let project_3d = move |pos: [f64; 3]| -> (egui::Pos2, f64) {
                 let x = pos[0];
                 let y = -pos[1]; // Invert Y to correct longitude coordinate system orientation
                 let z = pos[2];
 
                 // 1. Rotate around Y-axis by map_yaw
-                let cos_yaw = (self.map_yaw as f64).cos();
-                let sin_yaw = (self.map_yaw as f64).sin();
+                let cos_yaw = (map_yaw as f64).cos();
+                let sin_yaw = (map_yaw as f64).sin();
                 let x1 = x * cos_yaw - z * sin_yaw;
                 let z1 = x * sin_yaw + z * cos_yaw;
                 let y1 = y;
 
                 // 2. Rotate around X-axis by map_pitch
-                let cos_pitch = (self.map_pitch as f64).cos();
-                let sin_pitch = (self.map_pitch as f64).sin();
+                let cos_pitch = (map_pitch as f64).cos();
+                let sin_pitch = (map_pitch as f64).sin();
                 let x2 = x1;
                 let y2 = y1 * cos_pitch - z1 * sin_pitch;
                 let z2 = y1 * sin_pitch + z1 * cos_pitch; // positive is towards camera
@@ -2002,6 +2451,51 @@ impl eframe::App for HydronGuiApp {
 
                 (egui::pos2(screen_x, screen_y), z2)
             };
+
+            let mut rotate_globe = true;
+            let mut drag_to_perform = None;
+            if let Some(ref sat_id) = self.dragging_satellite_id {
+                rotate_globe = false;
+                if response.dragged() {
+                    if let Some(mouse_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                        drag_to_perform = Some((sat_id.clone(), mouse_pos));
+                    }
+                }
+            } else {
+                if response.drag_started() {
+                    if let Some(mouse_pos) = ui.input(|i| i.pointer.press_origin()) {
+                        for seg in &self.constellation.segments {
+                            for sat in &seg.satellites {
+                                let (sat_pos_px, rot_z) = project_3d(sat.r);
+                                if rot_z > 0.0 {
+                                    if sat_pos_px.distance(mouse_pos) < 12.0 {
+                                        self.dragging_satellite_id = Some(sat.id.clone());
+                                        rotate_globe = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !rotate_globe {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((sat_id, mouse_pos)) = drag_to_perform {
+                self.drag_satellite_to(&sat_id, mouse_pos, center, scale);
+            }
+
+            if !ui.input(|i| i.pointer.any_down()) {
+                self.dragging_satellite_id = None;
+            }
+
+            if rotate_globe && response.dragged() {
+                let delta = response.drag_delta();
+                self.map_yaw += delta.x * 0.005;
+                self.map_pitch = (self.map_pitch - delta.y * 0.005).clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+            }
 
             // Draw Earth (textured 3D sphere mesh, or fallback to solid blue circle)
             let r_earth = self.config.env.r_earth;
@@ -2204,75 +2698,38 @@ impl eframe::App for HydronGuiApp {
                 stations_screen.push((gs.id.clone(), gs_pos_px, gs_eci, gs.k_value, rot_z));
             }
 
-            let mut sat_visible_to_gs = std::collections::HashSet::new();
-            for (sat_id, orbit_type, _, sat_r, _) in &satellites_screen {
-                if *orbit_type == OrbitType::LEO {
-                    for (_, _, gs_r, _, _) in &stations_screen {
-                        if visible_sgl(*sat_r, *gs_r, self.config.env.r_earth) {
-                            sat_visible_to_gs.insert(sat_id.clone());
-                            break;
-                        }
-                    }
+            // Draw active links between Satellites (ISL) using pre-calculated active_isls
+            for &(i, j, capacity) in &active_isls {
+                if i >= all_sats.len() || j >= all_sats.len() {
+                    continue;
                 }
-            }
+                let (id1, _, _) = &all_sats[i];
+                let (id2, _, _) = &all_sats[j];
 
-            // Draw active links between Satellites (ISL)
-            for i in 0..satellites_screen.len() {
-                for j in (i + 1)..satellites_screen.len() {
-                    let (id1, type1, pos1_px, r1, rot_z1) = &satellites_screen[i];
-                    let (id2, type2, pos2_px, r2, rot_z2) = &satellites_screen[j];
+                let pos1 = satellites_screen.iter().find(|(id, _, _, _, _)| id == id1);
+                let pos2 = satellites_screen.iter().find(|(id, _, _, _, _)| id == id2);
 
-                    let is_leo_gs_vis = (type1 == &OrbitType::LEO && sat_visible_to_gs.contains(id1))
-                        || (type2 == &OrbitType::LEO && sat_visible_to_gs.contains(id2));
-
-                    let show_link = match (type1, type2) {
-                        (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
-                        (OrbitType::MEO, OrbitType::MEO) => self.show_meo,
-                        (OrbitType::GEO, OrbitType::GEO) => self.show_geo,
-                        _ => self.show_meo || self.show_geo || self.show_leo,
-                    } && !is_leo_gs_vis;
-
-                    if show_link && visible(*r1, *r2, self.config.env.r_earth) {
-                        let sat_max1 = match type1 {
-                            OrbitType::LEO => 100.0_f64,
-                            OrbitType::MEO => 400.0_f64,
-                            OrbitType::GEO => 800.0_f64,
-                        };
-                        let sat_max2 = match type2 {
-                            OrbitType::LEO => 100.0_f64,
-                            OrbitType::MEO => 400.0_f64,
-                            OrbitType::GEO => 800.0_f64,
-                        };
-                        let nominal_capacity = sat_max1.min(sat_max2);
-                        let sat_ref_dist = match type1 {
-                            OrbitType::LEO => self.config.ref_dist_isl_km,
-                            OrbitType::MEO => self.config.meo_alt_km,
-                            OrbitType::GEO => self.config.geo_alt_km,
-                        };
-                        let capacity = compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env);
-                        if capacity > 0.0 {
-                            let color = if capacity > 5.0 {
-                                egui::Color32::from_rgb(34, 197, 94)
-                            } else if capacity > 1.0 {
-                                egui::Color32::from_rgb(234, 179, 8)
-                            } else {
-                                egui::Color32::from_rgb(239, 68, 68)
-                            };
-                            
-                            let dist1 = pos1_px.distance(center);
-                            let dist2 = pos2_px.distance(center);
-                            let occluded1 = *rot_z1 < 0.0 && dist1 < earth_radius_px;
-                            let occluded2 = *rot_z2 < 0.0 && dist2 < earth_radius_px;
-                            
-                            let link_stroke = if occluded1 || occluded2 {
-                                egui::Stroke::new(1.0, color.linear_multiply(0.12))
-                            } else {
-                                egui::Stroke::new(1.0, color.linear_multiply(0.4))
-                            };
-                            
-                            painter.line_segment([*pos1_px, *pos2_px], link_stroke);
-                        }
-                    }
+                if let (Some((_, _, pos1_px, _, rot_z1)), Some((_, _, pos2_px, _, rot_z2))) = (pos1, pos2) {
+                    let color = if capacity > 5.0 {
+                        egui::Color32::from_rgb(34, 197, 94)
+                    } else if capacity > 1.0 {
+                        egui::Color32::from_rgb(234, 179, 8)
+                    } else {
+                        egui::Color32::from_rgb(239, 68, 68)
+                    };
+                    
+                    let dist1 = pos1_px.distance(center);
+                    let dist2 = pos2_px.distance(center);
+                    let occluded1 = *rot_z1 < 0.0 && dist1 < earth_radius_px;
+                    let occluded2 = *rot_z2 < 0.0 && dist2 < earth_radius_px;
+                    
+                    let link_stroke = if occluded1 || occluded2 {
+                        egui::Stroke::new(1.0, color.linear_multiply(0.12))
+                    } else {
+                        egui::Stroke::new(1.0, color.linear_multiply(0.4))
+                    };
+                    
+                    painter.line_segment([*pos1_px, *pos2_px], link_stroke);
                 }
             }
 
@@ -2280,9 +2737,9 @@ impl eframe::App for HydronGuiApp {
             if self.show_sgl {
                 for (_sat_id, _type, sat_pos_px, sat_r, sat_rot_z) in &satellites_screen {
                     let sat_max_speed = match _type {
-                        OrbitType::LEO => 100.0,
-                        OrbitType::MEO => 400.0,
-                        OrbitType::GEO => 800.0,
+                        OrbitType::LEO => self.leo_max_bitrate,
+                        OrbitType::MEO => self.meo_max_bitrate,
+                        OrbitType::GEO => self.geo_max_bitrate,
                     };
 
                     let mut best_gs: Option<String> = None;
@@ -2469,6 +2926,7 @@ impl eframe::App for HydronGuiApp {
             self.is_running = true;
             self.time_warp = 1;
             self.selected_satellite_id = "LEO_00".to_string();
+            self.dragging_satellite_id = None;
             self.constellation = create_satellites_from_config(&self.config);
             self.ground_stations = self.config.stations.clone();
             self.weather_overrides = vec![Some(0); self.ground_stations.len()];
@@ -2476,6 +2934,9 @@ impl eframe::App for HydronGuiApp {
             self.history_stations = vec![Vec::new(); self.ground_stations.len()];
             self.history_total.clear();
             self.map_zoom = 1.0;
+            self.leo_max_bitrate = 100.0;
+            self.meo_max_bitrate = 400.0;
+            self.geo_max_bitrate = 800.0;
             self.log("Simulation State Reset to initial values");
         }
     }
