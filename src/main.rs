@@ -2102,6 +2102,13 @@ impl eframe::App for HydronGuiApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.checkbox(&mut self.simplified_mode, "✨ Interfaccia Semplificata");
+                    ui.separator();
+                    ui.menu_button("🪟 HUD Windows", |ui| {
+                        ui.checkbox(&mut self.show_telemetry_hud, "📊 Telemetria");
+                        ui.checkbox(&mut self.show_stations_hud, "🏠 Stazioni di Terra");
+                        ui.checkbox(&mut self.show_leo_list_hud, "📶 Bitrates");
+                        ui.checkbox(&mut self.show_logs_hud, "📝 Console Logs");
+                    });
                 });
             });
 
@@ -3949,7 +3956,11 @@ fn main() {
     console_error_panic_hook::set_once();
 
     let web_options = eframe::WebOptions::default();
-    let config = default_config();
+    let config_toml = include_str!("../config.toml");
+    let config = match parse_config_from_str(config_toml) {
+        Ok(c) => c,
+        Err(_) => default_config(),
+    };
 
     wasm_bindgen_futures::spawn_local(async {
         eframe::WebRunner::new()
