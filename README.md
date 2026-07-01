@@ -93,16 +93,22 @@ Where:
    *Make sure `earth.jpg` and `config.toml` (optional) are in the working directory.*
 
 #### 🌐 Web Browser (WebAssembly)
-1. **Serve locally**:
+1. **Install prerequisites** (if not already installed):
+   ```bash
+   cargo install trunk
+   rustup target add wasm32-unknown-unknown
+   ```
+2. **Serve locally**:
    ```bash
    trunk serve
    ```
-2. **Open in browser**:
+3. **Open in browser**:
    Navigate to `http://localhost:8080` in your web browser.
-3. **Build release static assets**:
+4. **Build release static assets**:
    ```bash
    trunk build --release
    ```
+
    The compiled static website (HTML, JS, WASM) will be generated inside the `dist/` directory, ready to be deployed to GitHub Pages, Vercel, Netlify, or any static server.
 
 
