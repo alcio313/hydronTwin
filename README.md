@@ -1,8 +1,10 @@
 # HydRON Constellation Digital Twin & GUI Monitor
 
-Welcome to the **HydRON Digital Twin (DT) Builder and GUI Monitor**, an interactive simulation environment designed for real-time visualization, configuration, and analysis of multi-layer satellite constellations (LEO, MEO, GEO) and their ground communications network.
+Welcome to the **HydRON Digital Twin (DT) Builder and GUI Monitor**, an interactive simulation environment designed for real-time visualization, configuration, and analysis of multi-layer satellite constellations (LEO, MEO, GEO) and their ground communications network, inspired by the [ESA HydRON Project (High Throughput Optical Network)](https://resilience.esa.int/archives/partnership-projects/hydron).
 
 Developed in Rust using the `egui` immediate-mode GUI framework, this project implements high-fidelity orbital mechanics, attitude control systems (ADCS), atmospheric attenuation models, and dynamic network routing simulation.
+
+🚀 **Try the Live Web Demo**: [alcio313.github.io/hydronTwin](https://alcio313.github.io/hydronTwin/)
 
 ---
 
