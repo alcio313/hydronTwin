@@ -1,7 +1,14 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::BufReader;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use eframe::egui;
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
 
 // LCG Random Number Generator for deterministic and reproducible simulations.
 #[derive(Debug, Clone)]
@@ -271,10 +278,7 @@ fn az_el_dist(obs_r: [f64; 3], obs_lat: f64, obs_lon: f64, tgt_r: [f64; 3]) -> (
 
 // Simple hand-rolled TOML config loader to keep the application dependency-free
 // ponytail: custom config loader that avoids external crate compilation and downloads.
-pub fn load_config<P: AsRef<Path>>(path: P) -> io::Result<Config> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    
+pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut name = String::from("HydRON");
     let mut leo_num = 10;
     let mut leo_alt_km = 550.0;
@@ -532,6 +536,20 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> io::Result<Config> {
         ref_dist_isl_km,
         ref_dist_sgl_km,
     })
+}
+
+// Simple hand-rolled TOML config loader to keep the application dependency-free
+// ponytail: custom config loader that avoids external crate compilation and downloads.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_config<P: AsRef<Path>>(path: P) -> io::Result<Config> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    parse_config_from_reader(reader)
+}
+
+pub fn parse_config_from_str(content: &str) -> io::Result<Config> {
+    let reader = std::io::Cursor::new(content.as_bytes());
+    parse_config_from_reader(reader)
 }
 
 // 1. step_orbit: Propagates the satellite orbit using RK4 with two-body gravity + J2 + atmospheric drag + SRP.
@@ -1027,6 +1045,7 @@ pub struct HydronGuiApp {
 
     // Log list
     logs: Vec<String>,
+    #[allow(dead_code)]
     config_path: String,
 
     // Throughput history for bottom panel plotting
@@ -1591,8 +1610,8 @@ impl HydronGuiApp {
         }
     }
 
-    fn import_config(&mut self, path: &str) -> Result<(), String> {
-        match load_config(path) {
+    fn import_config_content(&mut self, content: &str, source_name: &str) -> Result<(), String> {
+        match parse_config_from_str(content) {
             Ok(new_config) => {
                 self.config = new_config;
                 // Reinitialize simulation state matching load
@@ -1611,7 +1630,7 @@ impl HydronGuiApp {
                 self.update_input_fields_for_selected();
                 self.weather_overrides = vec![Some(0); self.ground_stations.len()];
                 self.history_stations = vec![vec![0.0f32; self.history_time.len()]; self.ground_stations.len()];
-                self.log(&format!("Configurazione importata correttamente da {}", path));
+                self.log(&format!("Configurazione importata correttamente da {}", source_name));
                 Ok(())
             }
             Err(e) => {
@@ -1622,7 +1641,19 @@ impl HydronGuiApp {
         }
     }
 
-    fn export_config(&mut self, path: &str) -> Result<(), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn import_config(&mut self, path: &str) -> Result<(), String> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => self.import_config_content(&content, path),
+            Err(e) => {
+                let err_msg = format!("Errore lettura file: {}", e);
+                self.log(&err_msg);
+                Err(err_msg)
+            }
+        }
+    }
+
+    fn generate_toml_string(&self) -> String {
         let c = &self.config;
         let mut toml = String::new();
         
@@ -1715,7 +1746,13 @@ impl HydronGuiApp {
         toml.push_str(&format!("sim_duration_s = 86400.0\n"));
         toml.push_str(&format!("ref_distance_isl_km = {:.1}\n", c.ref_dist_isl_km));
         toml.push_str(&format!("ref_distance_sgl_km = {:.1}\n", c.ref_dist_sgl_km));
+        
+        toml
+    }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_config(&mut self, path: &str) -> Result<(), String> {
+        let toml = self.generate_toml_string();
         match std::fs::write(path, toml) {
             Ok(_) => {
                 self.log(&format!("Configurazione esportata in {}", path));
@@ -1728,12 +1765,37 @@ impl HydronGuiApp {
             }
         }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn export_config(&mut self, path: &str) -> Result<(), String> {
+        let toml = self.generate_toml_string();
+        download_file(path, &toml);
+        self.log(&format!("Configurazione scaricata correttamente come {}", path));
+        Ok(())
+    }
+
 }
 
 impl eframe::App for HydronGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Run continuous animation/repaint loop
         ctx.request_repaint();
+
+        // Check for dropped files (drag & drop config import)
+        ctx.input(|i| {
+            if let Some(file) = i.raw.dropped_files.first() {
+                if let Some(bytes) = &file.bytes {
+                    if let Ok(content) = std::str::from_utf8(bytes) {
+                        let _ = self.import_config_content(content, &file.name);
+                    }
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(path) = &file.path {
+                        let _ = self.import_config(&path.to_string_lossy());
+                    }
+                }
+            }
+        });
 
         let mut pending_remove = None;
         let mut pending_add = false;
@@ -2117,22 +2179,32 @@ impl eframe::App for HydronGuiApp {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("📂 CONFIGURATION").strong().color(egui::Color32::LIGHT_BLUE));
                                 ui.horizontal(|ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut self.config_path).desired_width(120.0));
-                                    if ui.button("📥 Import").on_hover_text("Sfoglia e carica un file TOML").clicked() {
-                                        if let Some(path) = rfd::FileDialog::new()
-                                            .add_filter("TOML Configuration", &["toml"])
-                                            .pick_file() {
-                                            self.config_path = path.display().to_string();
-                                            let _ = self.import_config(&self.config_path.clone());
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        ui.add(egui::TextEdit::singleline(&mut self.config_path).desired_width(120.0));
+                                        if ui.button("📥 Import").on_hover_text("Sfoglia e carica un file TOML").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new()
+                                                .add_filter("TOML Configuration", &["toml"])
+                                                .pick_file() {
+                                                self.config_path = path.display().to_string();
+                                                let _ = self.import_config(&self.config_path.clone());
+                                            }
+                                        }
+                                        if ui.button("📤 Export").on_hover_text("Seleziona cartella e nome file per esportare").clicked() {
+                                            if let Some(path) = rfd::FileDialog::new()
+                                                .add_filter("TOML Configuration", &["toml"])
+                                                .set_file_name("config.toml")
+                                                .save_file() {
+                                                self.config_path = path.display().to_string();
+                                                let _ = self.export_config(&self.config_path.clone());
+                                            }
                                         }
                                     }
-                                    if ui.button("📤 Export").on_hover_text("Seleziona cartella e nome file per esportare").clicked() {
-                                        if let Some(path) = rfd::FileDialog::new()
-                                            .add_filter("TOML Configuration", &["toml"])
-                                            .set_file_name("config.toml")
-                                            .save_file() {
-                                            self.config_path = path.display().to_string();
-                                            let _ = self.export_config(&self.config_path.clone());
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        ui.label("📥 Trascina TOML qui per importare").on_hover_text("Rilascia un file config.toml in qualsiasi punto della finestra");
+                                        if ui.button("📤 Export").on_hover_text("Scarica la configurazione corrente come file config.toml").clicked() {
+                                            let _ = self.export_config("config.toml");
                                         }
                                     }
                                 });
@@ -3790,6 +3862,63 @@ impl eframe::App for HydronGuiApp {
     }
 }
 
+pub fn default_config() -> Config {
+    Config {
+        name: "HydRON-Like-Net".to_string(),
+        leo_num: 10,
+        leo_alt_km: 550.0,
+        leo_inc_deg: 97.6,
+        leo_mass: 20.0,
+        leo_area: 0.1,
+        leo_cd: 2.2,
+        leo_cr: 1.2,
+        meo_num: 4,
+        meo_alt_km: 10000.0,
+        meo_inc_deg: 55.0,
+        meo_raans: vec![0.0, 90.0, 180.0, 270.0],
+        meo_mass: 50.0,
+        meo_area: 0.25,
+        meo_cd: 0.0,
+        meo_cr: 1.2,
+        geo_num: 3,
+        geo_lons: vec![0.0, 60.0, -120.0],
+        geo_alt_km: 35786.0,
+        geo_inc_deg: 0.0,
+        geo_mass: 200.0,
+        geo_area: 1.5,
+        geo_cd: 0.0,
+        geo_cr: 1.2,
+        stations: vec![
+            GroundStation { id: "GS_SVA".to_string(), name: "Svalbard".to_string(), lat_rad: 78.2307f64.to_radians(), lon_rad: 15.6472f64.to_radians(), alt_m: 130.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+            GroundStation { id: "GS_ZRH".to_string(), name: "Zurich".to_string(), lat_rad: 47.4647f64.to_radians(), lon_rad:  8.5492f64.to_radians(), alt_m: 400.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+            GroundStation { id: "GS_REU".to_string(), name: "Reunion".to_string(), lat_rad: -20.9089f64.to_radians(), lon_rad: 55.5136f64.to_radians(), alt_m: 95.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+            GroundStation { id: "GS_MAU".to_string(), name: "Maui".to_string(), lat_rad: 20.7067f64.to_radians(), lon_rad: -156.257f64.to_radians(), alt_m: 100.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+        ],
+        atmos_states: vec!["clear".to_string(), "thin".to_string(), "thick".to_string(), "heavy".to_string()],
+        atmos_k: vec![0.05, 0.2, 1.5, 5.0],
+        transition_matrix: vec![
+            vec![0.85, 0.10, 0.04, 0.01],
+            vec![0.15, 0.70, 0.10, 0.05],
+            vec![0.05, 0.15, 0.65, 0.15],
+            vec![0.02, 0.08, 0.20, 0.70],
+        ],
+        env: SimEnvironment {
+            mu: 3.986004418e14,
+            r_earth: 6378137.0,
+            j2: 1.08262668e-3,
+            rho0_500km: 3.8e-12,
+            h0_km: 500.0,
+            scale_height_km: 70.0,
+            p_srp: 4.56e-6,
+        },
+        dt_time_step: 1.0,
+        ref_dist_isl_km: 1000.0,
+        ref_dist_sgl_km: 1000.0,
+    }
+}
+
+// Versione Desktop (Nativa)
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), eframe::Error> {
     println!("=== Starting HydRON-DT-Builder Interactive GUI Monitor ===");
 
@@ -3798,62 +3927,9 @@ fn main() -> Result<(), eframe::Error> {
         Ok(c) => c,
         Err(e) => {
             println!("Warning: config.toml could not be loaded: {}. Loading defaults.", e);
-            Config {
-                name: "HydRON-Like-Net".to_string(),
-                leo_num: 10,
-                leo_alt_km: 550.0,
-                leo_inc_deg: 97.6,
-                leo_mass: 20.0,
-                leo_area: 0.1,
-                leo_cd: 2.2,
-                leo_cr: 1.2,
-                meo_num: 4,
-                meo_alt_km: 10000.0,
-                meo_inc_deg: 55.0,
-                meo_raans: vec![0.0, 90.0, 180.0, 270.0],
-                meo_mass: 50.0,
-                meo_area: 0.25,
-                meo_cd: 0.0,
-                meo_cr: 1.2,
-                geo_num: 3,
-                geo_lons: vec![0.0, 60.0, -120.0],
-                geo_alt_km: 35786.0,
-                geo_inc_deg: 0.0,
-                geo_mass: 200.0,
-                geo_area: 1.5,
-                geo_cd: 0.0,
-                geo_cr: 1.2,
-                stations: vec![
-                    GroundStation { id: "GS_SVA".to_string(), name: "Svalbard".to_string(), lat_rad: 78.2307f64.to_radians(), lon_rad: 15.6472f64.to_radians(), alt_m: 130.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
-                    GroundStation { id: "GS_ZRH".to_string(), name: "Zurich".to_string(), lat_rad: 47.4647f64.to_radians(), lon_rad:  8.5492f64.to_radians(), alt_m: 400.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
-                    GroundStation { id: "GS_REU".to_string(), name: "Reunion".to_string(), lat_rad: -20.9089f64.to_radians(), lon_rad: 55.5136f64.to_radians(), alt_m: 95.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
-                    GroundStation { id: "GS_MAU".to_string(), name: "Maui".to_string(), lat_rad: 20.7067f64.to_radians(), lon_rad: -156.257f64.to_radians(), alt_m: 100.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
-                ],
-                atmos_states: vec!["clear".to_string(), "thin".to_string(), "thick".to_string(), "heavy".to_string()],
-                atmos_k: vec![0.05, 0.2, 1.5, 5.0],
-                transition_matrix: vec![
-                    vec![0.85, 0.10, 0.04, 0.01],
-                    vec![0.15, 0.70, 0.10, 0.05],
-                    vec![0.05, 0.15, 0.65, 0.15],
-                    vec![0.02, 0.08, 0.20, 0.70],
-                ],
-                env: SimEnvironment {
-                    mu: 3.986004418e14,
-                    r_earth: 6378137.0,
-                    j2: 1.08262668e-3,
-                    rho0_500km: 3.8e-12,
-                    h0_km: 500.0,
-                    scale_height_km: 70.0,
-                    p_srp: 4.56e-6,
-                },
-                dt_time_step: 1.0,
-                ref_dist_isl_km: 1000.0,
-                ref_dist_sgl_km: 1000.0,
-            }
+            default_config()
         }
     };
-
-
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -3868,3 +3944,41 @@ fn main() -> Result<(), eframe::Error> {
         Box::new(|cc| Box::new(HydronGuiApp::new(cc, config))),
     )
 }
+
+// Versione Web (WebAssembly)
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // Redirige i panic sulla console degli strumenti sviluppatore del browser
+    console_error_panic_hook::set_once();
+
+    let web_options = eframe::WebOptions::default();
+    let config = default_config();
+
+    wasm_bindgen_futures::spawn_local(async {
+        eframe::WebRunner::new()
+            .start(
+                "the_canvas_id",
+                web_options,
+                Box::new(|cc| Box::new(HydronGuiApp::new(cc, config))),
+            )
+            .await
+            .expect("Failed to start eframe");
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(inline_js = "
+    export function download_file(filename, text) {
+        const element = document.createElement('a');
+        element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+        element.setAttribute('download', filename);
+        element.style.display = 'none';
+        document.body.appendChild(element);
+        element.click();
+        document.body.removeChild(element);
+    }
+")]
+extern "C" {
+    pub fn download_file(filename: &str, text: &str);
+}
+

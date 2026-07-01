@@ -74,26 +74,37 @@ Where:
 ## 🚀 Getting Started
 
 ### Prerequisites
-* Rust compiler (MSRV 1.70+ recommended)
+* Rust compiler (MSRV 1.75+ recommended)
 * Cargo package manager
+* **For Web version**: [Trunk](https://trunkrs.dev/) installed (`cargo install trunk`) and the WebAssembly target (`rustup target add wasm32-unknown-unknown`)
 
 ### Building and Running
 
+#### 🖥️ Desktop (Native Application)
 1. **Clone the repository**:
    ```bash
    git clone https://github.com/alcio313/hydronTwin.git
    cd hydronTwin
    ```
-2. **Build the project**:
+2. **Build and Run**:
    ```bash
-   cargo build --release
+   cargo run --release
    ```
-3. **Run the application**:
-   ```bash
-   cargo run
-   ```
+   *Make sure `earth.jpg` and `config.toml` (optional) are in the working directory.*
 
-*Make sure `earth.jpg` and `config.toml` are in the working directory from which you run the application.*
+#### 🌐 Web Browser (WebAssembly)
+1. **Serve locally**:
+   ```bash
+   trunk serve
+   ```
+2. **Open in browser**:
+   Navigate to `http://localhost:8080` in your web browser.
+3. **Build release static assets**:
+   ```bash
+   trunk build --release
+   ```
+   The compiled static website (HTML, JS, WASM) will be generated inside the `dist/` directory, ready to be deployed to GitHub Pages, Vercel, Netlify, or any static server.
+
 
 ---
 
@@ -111,7 +122,7 @@ The application loads its default parameters from a `config.toml` file in the ro
 
 ### Left Panel (Configuration & Limits)
 * **⚙ Visual Filters**: Checkboxes to toggle LEO ISL, MEO ISL, GEO ISL, or Ground Links (SGL) on/off. Includes a logarithmic map zoom slider.
-* **📁 CONFIGURATION**: Input field and Import/Export buttons to dynamically load/save custom TOML configurations using file dialog pickers.
+* **📁 CONFIGURATION**: Allows loading/saving custom TOML configurations. On Desktop, it uses native file dialog pickers. On Web, drag & drop a TOML file anywhere on the browser window to import it, and click "Export" to download the current configuration directly to your downloads folder.
 * **🛰 LEO Routing Priority**: Toggle between Ground First (SGL) and Relay Only (ISL) to prioritize routing satellite data through MEO/GEO relays instead of direct SGL paths.
 * **📶 Bitrate Massimo Satelliti**: Dynamically adjust the peak bitrate capacity (Gbps) for LEO, MEO, and GEO satellites. Changes take effect instantly across all simulation calculations and the CSV exporter.
 * **📡 Modifica Costellazione**: Change constellation sizes, altitudes, and inclinations on the fly.
