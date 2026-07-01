@@ -1214,25 +1214,22 @@ impl HydronGuiApp {
             simplified_mode: true,
         };
 
-        // Load Earth texture map
-        if let Ok(img_data) = std::fs::read("earth.jpg") {
-            if let Ok(img) = image::load_from_memory_with_format(&img_data, image::ImageFormat::Jpeg) {
-                let rgba = img.to_rgba8();
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [img.width() as usize, img.height() as usize],
-                    rgba.as_raw(),
-                );
-                app.earth_texture = Some(cc.egui_ctx.load_texture(
-                    "earth-texture",
-                    color_image,
-                    egui::TextureOptions::default(),
-                ));
-                app.log("Loaded Earth surface texture successfully.");
-            } else {
-                app.log("Warning: earth.jpg could not be decoded as JPEG.");
-            }
+        // Load Earth texture map (embedded at compile-time to work seamlessly on web & desktop)
+        let img_bytes = include_bytes!("../earth.jpg");
+        if let Ok(img) = image::load_from_memory_with_format(img_bytes, image::ImageFormat::Jpeg) {
+            let rgba = img.to_rgba8();
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [img.width() as usize, img.height() as usize],
+                rgba.as_raw(),
+            );
+            app.earth_texture = Some(cc.egui_ctx.load_texture(
+                "earth-texture",
+                color_image,
+                egui::TextureOptions::default(),
+            ));
+            app.log("Loaded Earth surface texture successfully.");
         } else {
-            app.log("Warning: earth.jpg texture file not found in directory.");
+            app.log("Warning: embedded earth.jpg could not be decoded.");
         }
         app.update_input_fields_for_selected();
         app
