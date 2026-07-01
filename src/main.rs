@@ -1773,6 +1773,121 @@ impl HydronGuiApp {
         Ok(())
     }
 
+    fn draw_throughput_chart(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(10, 15, 30));
+        painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 41, 59)));
+
+        if self.history_time.len() < 2 {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "In attesa di dati di simulazione...", egui::FontId::proportional(12.0), egui::Color32::GRAY);
+            return;
+        }
+
+        let mut max_y = 100.0_f32;
+        for val in &self.history_total {
+            if *val > max_y {
+                max_y = *val;
+            }
+        }
+        max_y *= 1.1;
+
+        let mut min_x = self.history_time[0];
+        let mut max_x = self.history_time[0];
+        for &t in &self.history_time {
+            if t < min_x { min_x = t; }
+            if t > max_x { max_x = t; }
+        }
+        let dx = max_x - min_x;
+
+        let margin_left = 65.0f32;
+        let margin_right = 15.0f32;
+        let margin_top = 22.0f32;
+        let margin_bottom = 15.0f32;
+
+        let plot_width = rect.width() - margin_left - margin_right;
+        let plot_height = rect.height() - margin_top - margin_bottom;
+
+        let to_screen = |x: f32, y: f32| -> egui::Pos2 {
+            let x_frac = if dx > 0.0 { (x - min_x) / dx } else { 0.0 };
+            let y_frac = y / max_y;
+            egui::pos2(
+                rect.min.x + margin_left + x_frac * plot_width,
+                rect.max.y - margin_bottom - y_frac * plot_height,
+            )
+        };
+
+        let grid_lines = 3;
+        for k in 0..=grid_lines {
+            let y_val = (k as f32 / grid_lines as f32) * max_y;
+            let pos_left = to_screen(min_x, y_val);
+            let pos_right = to_screen(max_x, y_val);
+            painter.line_segment([pos_left, pos_right], egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30)));
+            painter.text(
+                egui::pos2(rect.min.x + margin_left - 5.0, pos_left.y),
+                egui::Align2::RIGHT_CENTER,
+                format!("{:.0} Gbps", y_val),
+                egui::FontId::proportional(9.0),
+                egui::Color32::GRAY
+            );
+        }
+
+        let grid_lines_x = 5;
+        for k in 0..=grid_lines_x {
+            let x_val = min_x + (k as f32 / grid_lines_x as f32) * dx;
+            let pos_bottom = to_screen(x_val, 0.0);
+            let pos_top = to_screen(x_val, max_y);
+            painter.line_segment([pos_bottom, pos_top], egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30)));
+            painter.text(
+                egui::pos2(pos_bottom.x, rect.max.y - margin_bottom + 8.0),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}s", x_val),
+                egui::FontId::proportional(9.0),
+                egui::Color32::GRAY
+            );
+        }
+
+        let colors = [
+            egui::Color32::from_rgb(56, 189, 248),
+            egui::Color32::from_rgb(234, 179, 8),
+            egui::Color32::from_rgb(168, 85, 247),
+            egui::Color32::from_rgb(236, 72, 153),
+        ];
+
+        for i in 0..self.ground_stations.len() {
+            let color = colors[i % colors.len()];
+            let mut points = Vec::new();
+            for k in 0..self.history_time.len() {
+                points.push(to_screen(self.history_time[k], self.history_stations[i][k]));
+            }
+            for w in points.windows(2) {
+                painter.line_segment([w[0], w[1]], egui::Stroke::new(1.2, color));
+            }
+        }
+
+        let mut total_points = Vec::new();
+        for k in 0..self.history_time.len() {
+            total_points.push(to_screen(self.history_time[k], self.history_total[k]));
+        }
+        for w in total_points.windows(2) {
+            painter.line_segment([w[0], w[1]], egui::Stroke::new(2.2, egui::Color32::WHITE));
+        }
+
+        let mut legend_x = rect.min.x + margin_left + 15.0;
+        let legend_y = rect.min.y + 12.0;
+        
+        painter.circle_filled(egui::pos2(legend_x, legend_y), 3.0, egui::Color32::WHITE);
+        painter.text(egui::pos2(legend_x + 8.0, legend_y), egui::Align2::LEFT_CENTER, "Totale Aggregato", egui::FontId::proportional(9.0), egui::Color32::WHITE);
+        legend_x += 105.0;
+
+        for i in 0..self.ground_stations.len() {
+            let name = &self.ground_stations[i].name;
+            let color = colors[i % colors.len()];
+            painter.circle_filled(egui::pos2(legend_x, legend_y), 3.0, color);
+            painter.text(egui::pos2(legend_x + 8.0, legend_y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(9.0), egui::Color32::LIGHT_GRAY);
+            legend_x += 70.0;
+        }
+    }
+
 }
 
 impl eframe::App for HydronGuiApp {
@@ -3188,127 +3303,7 @@ impl eframe::App for HydronGuiApp {
                     ui.available_size(),
                     egui::Sense::hover()
                 );
-
-                let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(10, 15, 30));
-                painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 41, 59)));
-
-                if self.history_time.len() < 2 {
-                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, "In attesa di dati di simulazione...", egui::FontId::proportional(12.0), egui::Color32::GRAY);
-                    return;
-                }
-
-                // Find max value in history to scale Y axis (with a minimum of 100 Gbps)
-                let mut max_y = 100.0_f32;
-                for val in &self.history_total {
-                    if *val > max_y {
-                        max_y = *val;
-                    }
-                }
-                max_y *= 1.1; // Add 10% headroom
-
-                let mut min_x = self.history_time[0];
-                let mut max_x = self.history_time[0];
-                for &t in &self.history_time {
-                    if t < min_x { min_x = t; }
-                    if t > max_x { max_x = t; }
-                }
-                let dx = max_x - min_x;
-
-
-                let margin_left = 65.0f32;
-                let margin_right = 15.0f32;
-                let margin_top = 22.0f32;
-                let margin_bottom = 15.0f32;
-
-                let plot_width = rect.width() - margin_left - margin_right;
-                let plot_height = rect.height() - margin_top - margin_bottom;
-
-                let to_screen = |x: f32, y: f32| -> egui::Pos2 {
-                    let x_frac = if dx > 0.0 { (x - min_x) / dx } else { 0.0 };
-                    let y_frac = y / max_y;
-                    egui::pos2(
-                        rect.min.x + margin_left + x_frac * plot_width,
-                        rect.max.y - margin_bottom - y_frac * plot_height,
-                    )
-                };
-
-                // Draw Y axis grid lines and labels
-                let grid_lines = 3;
-                for k in 0..=grid_lines {
-                    let y_val = (k as f32 / grid_lines as f32) * max_y;
-                    let pos_left = to_screen(min_x, y_val);
-                    let pos_right = to_screen(max_x, y_val);
-                    painter.line_segment([pos_left, pos_right], egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30)));
-                    painter.text(
-                        egui::pos2(rect.min.x + margin_left - 5.0, pos_left.y),
-                        egui::Align2::RIGHT_CENTER,
-                        format!("{:.0} Gbps", y_val),
-                        egui::FontId::proportional(9.0),
-                        egui::Color32::GRAY
-                    );
-                }
-
-                // Draw X axis grid lines and labels (epoch times)
-                let grid_lines_x = 5;
-                for k in 0..=grid_lines_x {
-                    let x_val = min_x + (k as f32 / grid_lines_x as f32) * dx;
-                    let pos_bottom = to_screen(x_val, 0.0);
-                    let pos_top = to_screen(x_val, max_y);
-                    painter.line_segment([pos_bottom, pos_top], egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30)));
-                    painter.text(
-                        egui::pos2(pos_bottom.x, rect.max.y - margin_bottom + 8.0),
-                        egui::Align2::CENTER_CENTER,
-                        format!("{:.0}s", x_val),
-                        egui::FontId::proportional(9.0),
-                        egui::Color32::GRAY
-                    );
-                }
-
-                // Draw station lines
-                let colors = [
-                    egui::Color32::from_rgb(56, 189, 248),   // sky blue
-                    egui::Color32::from_rgb(234, 179, 8),    // gold
-                    egui::Color32::from_rgb(168, 85, 247),   // purple
-                    egui::Color32::from_rgb(236, 72, 153),   // pink
-                ];
-
-                for i in 0..self.ground_stations.len() {
-                    let color = colors[i % colors.len()];
-                    let mut points = Vec::new();
-                    for k in 0..self.history_time.len() {
-                        points.push(to_screen(self.history_time[k], self.history_stations[i][k]));
-                    }
-                    for w in points.windows(2) {
-                        painter.line_segment([w[0], w[1]], egui::Stroke::new(1.2, color));
-                    }
-                }
-
-                // Draw total aggregate line (thick white)
-                let mut total_points = Vec::new();
-                for k in 0..self.history_time.len() {
-                    total_points.push(to_screen(self.history_time[k], self.history_total[k]));
-                }
-                for w in total_points.windows(2) {
-                    painter.line_segment([w[0], w[1]], egui::Stroke::new(2.2, egui::Color32::WHITE));
-                }
-
-                // Draw legend
-                let mut legend_x = rect.min.x + margin_left + 15.0;
-                let legend_y = rect.min.y + 12.0;
-                
-                // Draw Total legend
-                painter.circle_filled(egui::pos2(legend_x, legend_y), 3.0, egui::Color32::WHITE);
-                painter.text(egui::pos2(legend_x + 8.0, legend_y), egui::Align2::LEFT_CENTER, "Totale Aggregato", egui::FontId::proportional(9.0), egui::Color32::WHITE);
-                legend_x += 105.0;
-
-                for i in 0..self.ground_stations.len() {
-                    let name = &self.ground_stations[i].name;
-                    let color = colors[i % colors.len()];
-                    painter.circle_filled(egui::pos2(legend_x, legend_y), 3.0, color);
-                    painter.text(egui::pos2(legend_x + 8.0, legend_y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(9.0), egui::Color32::LIGHT_GRAY);
-                    legend_x += 70.0;
-                }
+                self.draw_throughput_chart(ui, rect);
             });
         }
 
@@ -3640,6 +3635,23 @@ impl eframe::App for HydronGuiApp {
                             });
                     });
             }
+
+            let chart_height = (screen_size.y * 0.15).min(110.0).max(85.0);
+            egui::TopBottomPanel::bottom("mobile_chart_panel")
+                .frame(egui::Frame::none().fill(egui::Color32::from_rgb(10, 15, 30)))
+                .height_range(chart_height..=chart_height)
+                .show(ctx, |ui| {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("📊 Throughput Stazioni (Grafico)").size(10.0).strong().color(egui::Color32::WHITE));
+                    });
+                    
+                    let (rect, _response) = ui.allocate_exact_size(
+                        ui.available_size(),
+                        egui::Sense::hover()
+                    );
+                    self.draw_throughput_chart(ui, rect);
+                });
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
