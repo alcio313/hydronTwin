@@ -542,9 +542,18 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
 // ponytail: custom config loader that avoids external crate compilation and downloads.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_config<P: AsRef<Path>>(path: P) -> io::Result<Config> {
+    if !is_safe_path(&path) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Path traversal attempt detected"));
+    }
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     parse_config_from_reader(reader)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_safe_path<P: AsRef<Path>>(path: P) -> bool {
+    use std::path::Component;
+    path.as_ref().components().all(|c| !matches!(c, Component::ParentDir))
 }
 
 pub fn parse_config_from_str(content: &str) -> io::Result<Config> {
@@ -1642,6 +1651,11 @@ impl HydronGuiApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn import_config(&mut self, path: &str) -> Result<(), String> {
+        if !is_safe_path(path) {
+            let err_msg = "Errore: Percorso non sicuro (Path Traversal rilevato)".to_string();
+            self.log(&err_msg);
+            return Err(err_msg);
+        }
         match std::fs::read_to_string(path) {
             Ok(content) => self.import_config_content(&content, path),
             Err(e) => {
@@ -1751,6 +1765,11 @@ impl HydronGuiApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn export_config(&mut self, path: &str) -> Result<(), String> {
+        if !is_safe_path(path) {
+            let err_msg = "Errore: Percorso non sicuro (Path Traversal rilevato)".to_string();
+            self.log(&err_msg);
+            return Err(err_msg);
+        }
         let toml = self.generate_toml_string();
         match std::fs::write(path, toml) {
             Ok(_) => {
@@ -4472,3 +4491,26 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_safe_path() {
+        assert!(is_safe_path("config.toml"));
+        assert!(is_safe_path("configs/my_config.toml"));
+        assert!(is_safe_path("/home/user/config.toml"));
+        assert!(!is_safe_path("../etc/passwd"));
+        assert!(!is_safe_path("configs/../../etc/passwd"));
+        assert!(!is_safe_path(".."));
+        assert!(!is_safe_path("/../etc/passwd"));
+    }
+
+    #[test]
+    fn test_load_config_traversal() {
+        let result = load_config("../etc/passwd");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+}
