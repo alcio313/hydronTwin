@@ -4472,3 +4472,122 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_minimal_config() {
+        let content = "";
+        let config = parse_config_from_str(content).unwrap();
+        assert_eq!(config.name, "HydRON");
+        assert_eq!(config.leo_num, 10);
+        assert_eq!(config.leo_alt_km, 550.0);
+        // If we had ground stations by default, we would check atmos_state here.
+        // But minimal config has 0 stations.
+    }
+
+    #[test]
+    fn test_gs_atmos_state_default() {
+        let content = r#"
+[[ground.stations]]
+id = "GS"
+"#;
+        let config = parse_config_from_str(content).unwrap();
+        assert_eq!(config.stations[0].atmos_state, 0);
+    }
+
+    #[test]
+    fn test_parse_full_config() {
+        let content = r#"
+[constellation]
+name = "TestConst"
+
+[constellation.leo]
+num_satellites = 20
+altitude_km = 600.0
+inclination_deg = 45.0
+
+[environment]
+mu = 3.986e14
+j2 = 0.00108
+"#;
+        let config = parse_config_from_str(content).unwrap();
+        assert_eq!(config.name, "TestConst");
+        assert_eq!(config.leo_num, 20);
+        assert_eq!(config.leo_alt_km, 600.0);
+        assert_eq!(config.leo_inc_deg, 45.0);
+        assert_eq!(config.env.mu, 3.986e14);
+        assert_eq!(config.env.j2, 0.00108);
+    }
+
+    #[test]
+    fn test_parse_multiple_ground_stations() {
+        let content = r#"
+[[ground.stations]]
+id = "GS1"
+name = "Station 1"
+lat_deg = 10.0
+lon_deg = 20.0
+
+[[ground.stations]]
+id = "GS2"
+name = "Station 2"
+lat_deg = -10.0
+lon_deg = -20.0
+"#;
+        let config = parse_config_from_str(content).unwrap();
+        assert_eq!(config.stations.len(), 2);
+        assert_eq!(config.stations[0].id, "GS1");
+        assert_eq!(config.stations[1].id, "GS2");
+    }
+
+    #[test]
+    fn test_parse_with_comments_and_whitespace() {
+        let content = r#"
+# This is a comment
+[constellation]
+  name   =   "SpacedName"
+
+[constellation.leo]
+num_satellites = 5
+"#;
+        let config = parse_config_from_str(content).unwrap();
+        assert_eq!(config.name, "SpacedName");
+        assert_eq!(config.leo_num, 5);
+    }
+
+    #[test]
+    fn test_parse_special_values() {
+        let content = r#"
+[[ground.stations]]
+id = "INF_GS"
+downlink_nominal_gbps = "inf"
+
+[[ground.stations]]
+id = "UNLIM_GS"
+downlink_nominal_gbps = "unlimited"
+"#;
+        let config = parse_config_from_str(content).unwrap();
+        assert_eq!(config.stations.len(), 2);
+        assert!(config.stations[0].downlink_nominal_gbps.is_infinite());
+        assert!(config.stations[1].downlink_nominal_gbps.is_infinite());
+    }
+
+    #[test]
+    fn test_parse_array_fields() {
+        let content = r#"
+[constellation.meo]
+raans_deg = [10.0, 20.0, 30.0]
+
+[atmosphere]
+states = ["state1", "state2"]
+k_values_per_km = [0.1, 0.5]
+"#;
+        let config = parse_config_from_str(content).unwrap();
+        assert_eq!(config.meo_raans, vec![10.0, 20.0, 30.0]);
+        assert_eq!(config.atmos_states, vec!["state1".to_string(), "state2".to_string()]);
+        assert_eq!(config.atmos_k, vec![0.1, 0.5]);
+    }
+}
