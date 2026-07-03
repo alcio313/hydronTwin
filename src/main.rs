@@ -4472,3 +4472,94 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_satellites_empty_config() {
+        let mut config = default_config();
+        config.leo_num = 0;
+        config.meo_num = 0;
+        config.geo_num = 0;
+
+        let constellation = create_satellites_from_config(&config);
+        assert_eq!(constellation.name, config.name);
+        assert_eq!(constellation.segments.len(), 3);
+
+        for segment in &constellation.segments {
+            assert!(segment.satellites.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_create_satellites_standard_config() {
+        let config = default_config();
+        let constellation = create_satellites_from_config(&config);
+
+        assert_eq!(constellation.segments.len(), 3);
+
+        // LEO
+        let leo_seg = &constellation.segments[0];
+        assert_eq!(leo_seg.orbit_type, OrbitType::LEO);
+        assert_eq!(leo_seg.satellites.len(), config.leo_num);
+        if config.leo_num > 0 {
+            let sat = &leo_seg.satellites[0];
+            assert_eq!(sat.id, "LEO_00");
+            assert_eq!(sat.mass, config.leo_mass);
+            assert_eq!(sat.area, config.leo_area);
+            assert_eq!(sat.cd, config.leo_cd);
+            assert_eq!(sat.cr, config.leo_cr);
+        }
+
+        // MEO
+        let meo_seg = &constellation.segments[1];
+        assert_eq!(meo_seg.orbit_type, OrbitType::MEO);
+        assert_eq!(meo_seg.satellites.len(), config.meo_num);
+        if config.meo_num > 0 {
+            let sat = &meo_seg.satellites[0];
+            assert_eq!(sat.id, "MEO_00");
+            assert_eq!(sat.mass, config.meo_mass);
+            assert_eq!(sat.area, config.meo_area);
+            assert_eq!(sat.cd, config.meo_cd);
+            assert_eq!(sat.cr, config.meo_cr);
+        }
+
+        // GEO
+        let geo_seg = &constellation.segments[2];
+        assert_eq!(geo_seg.orbit_type, OrbitType::GEO);
+        assert_eq!(geo_seg.satellites.len(), config.geo_num);
+        if config.geo_num > 0 {
+            let sat = &geo_seg.satellites[0];
+            assert_eq!(sat.id, "GEO_00");
+            assert_eq!(sat.mass, config.geo_mass);
+            assert_eq!(sat.area, config.geo_area);
+            assert_eq!(sat.cd, config.geo_cd);
+            assert_eq!(sat.cr, config.geo_cr);
+        }
+    }
+
+    #[test]
+    fn test_create_satellites_orbital_mechanics_leo() {
+        let mut config = default_config();
+        config.leo_num = 1;
+        config.leo_alt_km = 500.0;
+        config.leo_inc_deg = 0.0;
+
+        let constellation = create_satellites_from_config(&config);
+        let sat = &constellation.segments[0].satellites[0];
+
+        let r_expected = config.env.r_earth + 500.0 * 1000.0;
+        let v_expected = (config.env.mu / r_expected).sqrt();
+
+        // With inc=0, u=0: r = [r_expected, 0, 0], v = [0, v_expected, 0]
+        assert!((sat.r[0] - r_expected).abs() < 1e-3);
+        assert!(sat.r[1].abs() < 1e-3);
+        assert!(sat.r[2].abs() < 1e-3);
+
+        assert!(sat.v[0].abs() < 1e-3);
+        assert!((sat.v[1] - v_expected).abs() < 1e-3);
+        assert!(sat.v[2].abs() < 1e-3);
+    }
+}
