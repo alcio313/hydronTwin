@@ -1475,15 +1475,15 @@ impl HydronGuiApp {
                     .then_with(|| a.3.cmp(&b.3))
             });
 
-            let mut leo_isl_count = std::collections::HashMap::new();
+            let mut leo_isl_count = vec![0; all_sats.len()];
             for (_class, capacity, i, j) in candidate_isls {
                 let (id1, type1, _) = &all_sats[i];
 
                 if j == usize::MAX {
-                    if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    if leo_isl_count[i] >= 1 {
                         continue;
                     }
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                    leo_isl_count[i] += 1;
 
                     let gs_idx = leo_best_gs[i];
                     gs_throughputs[gs_idx] += capacity;
@@ -1492,20 +1492,20 @@ impl HydronGuiApp {
                     sat_has_sgl.insert(id1.clone());
                     sat_sgl_link.insert(id1.clone(), capacity);
                 } else {
-                    let (id2, type2, _) = &all_sats[j];
+                    let (_, type2, _) = &all_sats[j];
 
-                    if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    if type1 == &OrbitType::LEO && leo_isl_count[i] >= 1 {
                         continue;
                     }
-                    if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                    if type2 == &OrbitType::LEO && leo_isl_count[j] >= 1 {
                         continue;
                     }
 
                     if type1 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                        leo_isl_count[i] += 1;
                     }
                     if type2 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                        leo_isl_count[j] += 1;
                     }
 
                     active_isl_links += 1;
@@ -2143,7 +2143,7 @@ impl eframe::App for HydronGuiApp {
                 .then_with(|| a.3.cmp(&b.3))
         });
 
-        let mut leo_isl_count = std::collections::HashMap::new();
+        let mut leo_isl_count = vec![0; all_sats.len()];
         let mut active_isls = Vec::new();
         let mut sat_isl_link = std::collections::HashMap::new();
 
@@ -2151,10 +2151,10 @@ impl eframe::App for HydronGuiApp {
             let (id1, type1, _) = &all_sats[i];
 
             if j == usize::MAX {
-                if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                if leo_isl_count[i] >= 1 {
                     continue;
                 }
-                *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                leo_isl_count[i] += 1;
 
                 let gs_idx = leo_best_gs[i];
                 let gs_name = &self.ground_stations[gs_idx].name;
@@ -2166,18 +2166,18 @@ impl eframe::App for HydronGuiApp {
             } else {
                 let (id2, type2, _) = &all_sats[j];
 
-                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                if type1 == &OrbitType::LEO && leo_isl_count[i] >= 1 {
                     continue;
                 }
-                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                if type2 == &OrbitType::LEO && leo_isl_count[j] >= 1 {
                     continue;
                 }
 
                 if type1 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                    leo_isl_count[i] += 1;
                 }
                 if type2 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                    leo_isl_count[j] += 1;
                 }
 
                 active_isls.push((i, j, capacity));
