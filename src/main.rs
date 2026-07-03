@@ -547,6 +547,19 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> io::Result<Config> {
     parse_config_from_reader(reader)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_config_path(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        return Err("Il percorso selezionato è una directory".to_string());
+    }
+    if p.extension().map_or(false, |ext| ext.to_string_lossy().to_lowercase() == "toml") {
+        Ok(())
+    } else {
+        Err("Il file deve avere estensione .toml".to_string())
+    }
+}
+
 pub fn parse_config_from_str(content: &str) -> io::Result<Config> {
     let reader = std::io::Cursor::new(content.as_bytes());
     parse_config_from_reader(reader)
@@ -1642,6 +1655,10 @@ impl HydronGuiApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn import_config(&mut self, path: &str) -> Result<(), String> {
+        if let Err(e) = validate_config_path(path) {
+            self.log(&e);
+            return Err(e);
+        }
         match std::fs::read_to_string(path) {
             Ok(content) => self.import_config_content(&content, path),
             Err(e) => {
@@ -1751,6 +1768,10 @@ impl HydronGuiApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn export_config(&mut self, path: &str) -> Result<(), String> {
+        if let Err(e) = validate_config_path(path) {
+            self.log(&e);
+            return Err(e);
+        }
         let toml = self.generate_toml_string();
         match std::fs::write(path, toml) {
             Ok(_) => {
@@ -4472,3 +4493,22 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_validate_path() {
+        assert!(validate_config_path("config.toml").is_ok());
+        assert!(validate_config_path("CONFIG.TOML").is_ok());
+        assert!(validate_config_path("test.toml").is_ok());
+
+        assert!(validate_config_path("config.txt").is_err());
+        assert!(validate_config_path("config").is_err());
+        assert!(validate_config_path(".").is_err());
+        assert!(validate_config_path("src").is_err());
+        assert!(validate_config_path("/etc/passwd").is_err());
+    }
+}
