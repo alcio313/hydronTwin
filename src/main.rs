@@ -4472,3 +4472,40 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scale_normal() {
+        let v = [1.0, 2.0, 3.0];
+        let s = 2.0;
+        let result = scale(v, s);
+        assert_eq!(result, [2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_scale_zero() {
+        let v = [1.0, 2.0, 3.0];
+        let s = 0.0;
+        let result = scale(v, s);
+        assert_eq!(result, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_scale_negative() {
+        let v = [1.0, -2.0, 3.0];
+        let s = -1.0;
+        let result = scale(v, s);
+        assert_eq!(result, [-1.0, 2.0, -3.0]);
+    }
+
+    #[test]
+    fn test_scale_zero_vector() {
+        let v = [0.0, 0.0, 0.0];
+        let s = 5.0;
+        let result = scale(v, s);
+        assert_eq!(result, [0.0, 0.0, 0.0]);
+    }
+}
