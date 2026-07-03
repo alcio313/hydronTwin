@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead};
 #[cfg(not(target_arch = "wasm32"))]
@@ -985,6 +986,21 @@ pub enum RibbonTab {
     Weather,
 }
 
+pub struct NetworkStatus {
+    pub gs_throughputs: Vec<f64>,
+    pub total_throughput: f64,
+    pub active_isls: Vec<(usize, usize, f64)>,
+    pub active_sgl_links_count: usize,
+    pub active_isl_links_count: usize,
+    pub connected_sats_per_gs: Vec<Vec<(String, String, f64, f64)>>,
+    pub sat_sgl_link: HashMap<String, (String, f64)>,
+    pub sat_isl_link: HashMap<String, (String, f64)>,
+    // Shared calculations needed for visualization
+    pub all_sats: Vec<(String, OrbitType, [f64; 3])>,
+    pub gs_eci_list: Vec<[f64; 3]>,
+    pub gst: f64,
+}
+
 pub struct HydronGuiApp {
     config: Config,
     constellation: Constellation,
@@ -1244,6 +1260,334 @@ impl HydronGuiApp {
         }
     }
 
+    fn step_simulation_state(
+        constellation: &mut Constellation,
+        ground_stations: &mut [GroundStation],
+        atmos_model: &mut AtmosphereModel,
+        weather_overrides: &[Option<usize>],
+        env: &SimEnvironment,
+        dt: f64,
+        sun_vector: [f64; 3],
+        b_eci_mock: [f64; 3],
+        selected_satellite_id: &str,
+        force_disturbance: &mut bool,
+        disturbance_val: [f64; 3],
+    ) -> Vec<String> {
+        let mut pending_logs = Vec::new();
+
+        // Step atmosphere
+        for (idx, gs) in ground_stations.iter_mut().enumerate() {
+            if let Some(forced_idx) = weather_overrides[idx] {
+                if gs.atmos_state != forced_idx {
+                    gs.atmos_state = forced_idx;
+                    gs.k_value = atmos_model.k_values[forced_idx] / 1000.0;
+                    let state_name = &atmos_model.states[forced_idx];
+                    pending_logs.push(format!("Weather at {} forced to {}", gs.name, state_name));
+                }
+            } else {
+                let prev_state = gs.atmos_state;
+                step_atmosphere(gs, atmos_model);
+                if gs.atmos_state != prev_state {
+                    let state_name = &atmos_model.states[gs.atmos_state];
+                    pending_logs.push(format!("Weather at {} transitioned to {}", gs.name, state_name));
+                }
+            }
+        }
+
+        // Step satellite dynamics
+        for segment in &mut constellation.segments {
+            for sat in &mut segment.satellites {
+                let rw_torque = [1e-3, -5e-4, 2e-4];
+                let mut mtq_dipole = [0.1, -0.05, 0.1];
+
+                if sat.id == selected_satellite_id && *force_disturbance {
+                    mtq_dipole = add(mtq_dipole, disturbance_val);
+                    *force_disturbance = false;
+                    pending_logs.push(format!("Injected attitude disturbance into satellite {}", sat.id));
+                }
+
+                step_orbit(sat, dt, env, sun_vector);
+                step_attitude(sat, dt, b_eci_mock, rw_torque, mtq_dipole);
+            }
+        }
+
+        pending_logs
+    }
+
+    fn calculate_network_status(
+        &self,
+        constellation: &Constellation,
+        ground_stations: &[GroundStation],
+        current_time: f64,
+        use_filters: bool,
+    ) -> NetworkStatus {
+        let gst = current_time * 7.292115e-5;
+        let rot_mat = eci_to_ecef_matrix(gst);
+        let rot_mat_t = [
+            [rot_mat[0][0], rot_mat[1][0], rot_mat[2][0]],
+            [rot_mat[0][1], rot_mat[1][1], rot_mat[2][1]],
+            [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
+        ];
+
+        let all_sats: Vec<(String, OrbitType, [f64; 3])> = constellation
+            .segments
+            .iter()
+            .flat_map(|seg| {
+                seg.satellites
+                    .iter()
+                    .map(|s| (s.id.clone(), s.orbit_type.clone(), s.r))
+            })
+            .collect();
+
+        let gs_eci_list: Vec<[f64; 3]> = ground_stations
+            .iter()
+            .map(|gs| {
+                let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                mat_vec_mult(rot_mat_t, ecef)
+            })
+            .collect();
+
+        let mut gs_throughputs = vec![0.0; ground_stations.len()];
+        let mut total_throughput = 0.0;
+        let mut active_sgl_links_count = 0;
+        let mut active_isl_links_count = 0;
+
+        let mut connected_sats_per_gs = vec![Vec::new(); ground_stations.len()];
+        let mut sat_has_sgl = HashSet::new();
+        let mut sat_sgl_link = HashMap::new();
+
+        let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
+        let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
+
+        for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
+            let sat_max = match orbit_type {
+                OrbitType::LEO => self.leo_max_bitrate,
+                OrbitType::MEO => self.meo_max_bitrate,
+                OrbitType::GEO => self.geo_max_bitrate,
+            };
+            let sat_ref_dist = match orbit_type {
+                OrbitType::LEO => self.config.ref_dist_sgl_km,
+                OrbitType::MEO => self.config.meo_alt_km,
+                OrbitType::GEO => self.config.geo_alt_km,
+            };
+
+            let mut best_cap = 0.0_f64;
+            let mut best_idx = usize::MAX;
+            for (i, other_eci) in gs_eci_list.iter().enumerate() {
+                let cap = compute_link_capacity(
+                    *sat_r,
+                    *other_eci,
+                    true,
+                    ground_stations[i].k_value,
+                    sat_ref_dist,
+                    sat_max,
+                    &self.config.env,
+                )
+                .min(sat_max);
+                if cap > best_cap {
+                    best_cap = cap;
+                    best_idx = i;
+                }
+            }
+
+            if best_idx < ground_stations.len() && best_cap > 0.0 {
+                if orbit_type == &OrbitType::LEO {
+                    leo_best_gs[sat_idx] = best_idx;
+                    leo_best_gs_cap[sat_idx] = best_cap;
+                } else {
+                    let orbit_label_str = match orbit_type {
+                        OrbitType::LEO => "LEO",
+                        OrbitType::MEO => "MEO",
+                        OrbitType::GEO => "GEO",
+                    };
+                    connected_sats_per_gs[best_idx].push((
+                        sat_id.clone(),
+                        orbit_label_str.to_string(),
+                        best_cap,
+                        sat_max,
+                    ));
+                    gs_throughputs[best_idx] += best_cap;
+                    total_throughput += best_cap;
+                    active_sgl_links_count += 1;
+                    sat_has_sgl.insert(sat_id.clone());
+                    sat_sgl_link.insert(sat_id.clone(), (ground_stations[best_idx].name.clone(), best_cap));
+                }
+            }
+        }
+
+        let mut candidate_isls = Vec::new();
+        for i in 0..all_sats.len() {
+            for j in (i + 1)..all_sats.len() {
+                let (id1, type1, r1) = &all_sats[i];
+                let (id2, type2, r2) = &all_sats[j];
+
+                let id1_has_sgl =
+                    sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
+                let id2_has_sgl =
+                    sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
+                let mut is_allowed = id1_has_sgl || id2_has_sgl;
+                if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
+                    is_allowed = false;
+                }
+                if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
+                    is_allowed = false;
+                }
+
+                let show_link = if use_filters {
+                    let filter_match = match (type1, type2) {
+                        (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
+                        (OrbitType::MEO, OrbitType::MEO) => self.show_meo,
+                        (OrbitType::GEO, OrbitType::GEO) => self.show_geo,
+                        _ => self.show_meo || self.show_geo || self.show_leo,
+                    };
+                    filter_match && is_allowed
+                } else {
+                    is_allowed
+                };
+
+                if show_link && visible(*r1, *r2, self.config.env.r_earth) {
+                    let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
+                    let capacity = if is_leo {
+                        self.leo_max_bitrate
+                    } else {
+                        let sat_max1 = match type1 {
+                            OrbitType::LEO => self.leo_max_bitrate,
+                            OrbitType::MEO => self.meo_max_bitrate,
+                            OrbitType::GEO => self.geo_max_bitrate,
+                        };
+                        let sat_max2 = match type2 {
+                            OrbitType::LEO => self.leo_max_bitrate,
+                            OrbitType::MEO => self.meo_max_bitrate,
+                            OrbitType::GEO => self.geo_max_bitrate,
+                        };
+                        let nominal_capacity = sat_max1.min(sat_max2);
+                        let sat_ref_dist = match type1 {
+                            OrbitType::LEO => self.config.ref_dist_isl_km,
+                            OrbitType::MEO => self.config.meo_alt_km,
+                            OrbitType::GEO => self.config.geo_alt_km,
+                        };
+                        compute_link_capacity(
+                            *r1,
+                            *r2,
+                            false,
+                            0.0,
+                            sat_ref_dist,
+                            nominal_capacity,
+                            &self.config.env,
+                        )
+                    };
+                    let mut capacity = capacity;
+                    let cap1 = if type1 == &OrbitType::LEO {
+                        leo_best_gs_cap[i]
+                    } else {
+                        sat_sgl_link.get(id1).map(|x| x.1).unwrap_or(0.0)
+                    };
+                    let cap2 = if type2 == &OrbitType::LEO {
+                        leo_best_gs_cap[j]
+                    } else {
+                        sat_sgl_link.get(id2).map(|x| x.1).unwrap_or(0.0)
+                    };
+
+                    if id1_has_sgl && id2_has_sgl {
+                        capacity = capacity.min(cap1.max(cap2));
+                    } else if id1_has_sgl {
+                        capacity = capacity.min(cap1);
+                    } else if id2_has_sgl {
+                        capacity = capacity.min(cap2);
+                    }
+                    if capacity > 0.0 {
+                        let class = match (type1, type2) {
+                            (OrbitType::LEO, OrbitType::LEO) => 2,
+                            (OrbitType::LEO, _) | (_, OrbitType::LEO) => 1,
+                            _ => 0,
+                        };
+                        candidate_isls.push((class, capacity, i, j));
+                    }
+                }
+            }
+        }
+
+        if !self.prioritize_relay {
+            for i in 0..all_sats.len() {
+                let (_, type_i, _) = &all_sats[i];
+                if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
+                    candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
+                }
+            }
+        }
+
+        candidate_isls.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+
+        let mut leo_isl_count = HashMap::new();
+        let mut active_isls = Vec::new();
+        let mut sat_isl_link = HashMap::new();
+
+        for (_class, capacity, i, j) in candidate_isls {
+            let (id1, type1, _) = &all_sats[i];
+
+            if j == usize::MAX {
+                if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
+                *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+
+                let gs_idx = leo_best_gs[i];
+                let gs_name = &ground_stations[gs_idx].name;
+                connected_sats_per_gs[gs_idx].push((
+                    id1.clone(),
+                    "LEO".to_string(),
+                    capacity,
+                    self.leo_max_bitrate,
+                ));
+                gs_throughputs[gs_idx] += capacity;
+                total_throughput += capacity;
+                active_sgl_links_count += 1;
+                sat_has_sgl.insert(id1.clone());
+                sat_sgl_link.insert(id1.clone(), (gs_name.clone(), capacity));
+            } else {
+                let (id2, type2, _) = &all_sats[j];
+
+                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
+                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                    continue;
+                }
+
+                if type1 == &OrbitType::LEO {
+                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                }
+                if type2 == &OrbitType::LEO {
+                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                }
+
+                active_isl_links_count += 1;
+                active_isls.push((i, j, capacity));
+                sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
+                sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
+            }
+        }
+
+        NetworkStatus {
+            gs_throughputs,
+            total_throughput,
+            active_isls,
+            active_sgl_links_count,
+            active_isl_links_count,
+            connected_sats_per_gs,
+            sat_sgl_link,
+            sat_isl_link,
+            all_sats,
+            gs_eci_list,
+            gst,
+        }
+    }
+
     fn update_input_fields_for_selected(&mut self) {
         let mut mass = 20.0;
         let mut cd = 2.2;
@@ -1301,223 +1645,31 @@ impl HydronGuiApp {
         let b_eci_mock = [1e-5, 2e-5, -3e-5];
 
         while current_time <= sim_duration {
-            // 1. Step atmosphere
-            for (idx, gs) in ground_stations.iter_mut().enumerate() {
-                if let Some(forced_idx) = self.weather_overrides[idx] {
-                    gs.atmos_state = forced_idx;
-                    gs.k_value = atmos_model.k_values[forced_idx] / 1000.0;
-                } else {
-                    step_atmosphere(gs, &mut atmos_model);
-                }
-            }
+            Self::step_simulation_state(
+                &mut constellation,
+                &mut ground_stations,
+                &mut atmos_model,
+                &self.weather_overrides,
+                &self.config.env,
+                step_size,
+                sun_vector,
+                b_eci_mock,
+                "None",
+                &mut false,
+                [0.0, 0.0, 0.0],
+            );
 
-            // 2. Step satellite dynamics
-            for segment in &mut constellation.segments {
-                for sat in &mut segment.satellites {
-                    let rw_torque = [1e-3, -5e-4, 2e-4];
-                    let mtq_dipole = [0.1, -0.05, 0.1];
-                    step_orbit(sat, step_size, &self.config.env, sun_vector);
-                    step_attitude(sat, step_size, b_eci_mock, rw_torque, mtq_dipole);
-                }
-            }
-
-            // 3. Calculate positions and throughputs
-            let gst = current_time * 7.292115e-5;
-            let rot_mat = eci_to_ecef_matrix(gst);
-            let rot_mat_t = [
-                [rot_mat[0][0], rot_mat[1][0], rot_mat[2][0]],
-                [rot_mat[0][1], rot_mat[1][1], rot_mat[2][1]],
-                [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
-            ];
-
-            let all_sats: Vec<(String, OrbitType, [f64; 3])> = constellation.segments.iter()
-                .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
-                .collect();
-
-            let gs_eci_list: Vec<[f64; 3]> = ground_stations.iter().map(|gs| {
-                let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-                mat_vec_mult(rot_mat_t, ecef)
-            }).collect();
-
-            let mut gs_throughputs = vec![0.0; ground_stations.len()];
-            let mut total_throughput = 0.0;
-            let mut active_sgl_links = 0;
-            let mut active_isl_links = 0;
-
-            let mut sat_has_sgl = std::collections::HashSet::new();
-            let mut sat_sgl_link = std::collections::HashMap::new();
-
-            // Track best SGL for LEO satellites
-            let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
-            let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
-
-            // SGL links capacity
-            for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
-                let sat_max = match orbit_type {
-                    OrbitType::LEO => self.leo_max_bitrate,
-                    OrbitType::MEO => self.meo_max_bitrate,
-                    OrbitType::GEO => self.geo_max_bitrate,
-                };
-                let sat_ref_dist = match orbit_type {
-                    OrbitType::LEO => self.config.ref_dist_sgl_km,
-                    OrbitType::MEO => self.config.meo_alt_km,
-                    OrbitType::GEO => self.config.geo_alt_km,
-                };
-
-                let mut best_cap = 0.0_f64;
-                let mut best_idx = usize::MAX;
-                for (i, other_eci) in gs_eci_list.iter().enumerate() {
-                    let cap = compute_link_capacity(
-                        *sat_r, *other_eci, true,
-                        ground_stations[i].k_value,
-                        sat_ref_dist, sat_max, &self.config.env
-                    ).min(sat_max);
-                    if cap > best_cap {
-                        best_cap = cap;
-                        best_idx = i;
-                    }
-                }
-
-                if best_idx < ground_stations.len() && best_cap > 0.0 {
-                    if orbit_type == &OrbitType::LEO {
-                        leo_best_gs[sat_idx] = best_idx;
-                        leo_best_gs_cap[sat_idx] = best_cap;
-                    } else {
-                        // MEO and GEO SGL links are allocated immediately
-                        gs_throughputs[best_idx] += best_cap;
-                        total_throughput += best_cap;
-                        active_sgl_links += 1;
-                        sat_has_sgl.insert(sat_id.clone());
-                        sat_sgl_link.insert(sat_id.clone(), best_cap);
-                    }
-                }
-            }
-
-            // ISL links
-            // ponytail: greedy satellite link allocation. Limits LEO satellites to 1 connection.
-            // O(N^2 log N) sort of candidates, which is fine for small constellations (<100 satellites).
-            let mut candidate_isls = Vec::new();
-            for i in 0..all_sats.len() {
-                for j in (i + 1)..all_sats.len() {
-                    let (id1, type1, r1) = &all_sats[i];
-                    let (id2, type2, r2) = &all_sats[j];
-
-                    let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
-                    let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
-                    let mut is_allowed = id1_has_sgl || id2_has_sgl;
-                    if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
-                        is_allowed = false;
-                    }
-                    if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
-                        is_allowed = false;
-                    }
-
-                    if is_allowed && visible(*r1, *r2, self.config.env.r_earth) {
-                        let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
-                        let capacity = if is_leo {
-                            self.leo_max_bitrate
-                        } else {
-                            let sat_max1 = match type1 {
-                                OrbitType::LEO => self.leo_max_bitrate,
-                                OrbitType::MEO => self.meo_max_bitrate,
-                                OrbitType::GEO => self.geo_max_bitrate,
-                            };
-                            let sat_max2 = match type2 {
-                                OrbitType::LEO => self.leo_max_bitrate,
-                                OrbitType::MEO => self.meo_max_bitrate,
-                                OrbitType::GEO => self.geo_max_bitrate,
-                            };
-                            let nominal_capacity = sat_max1.min(sat_max2);
-                            let sat_ref_dist = match type1 {
-                                OrbitType::LEO => self.config.ref_dist_isl_km,
-                                OrbitType::MEO => self.config.meo_alt_km,
-                                OrbitType::GEO => self.config.geo_alt_km,
-                            };
-                            compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
-                        };
-                        let mut capacity = capacity;
-                        let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).copied().unwrap_or(0.0) };
-                        let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).copied().unwrap_or(0.0) };
-
-                        if id1_has_sgl && id2_has_sgl {
-                            capacity = capacity.min(cap1.max(cap2));
-                        } else if id1_has_sgl {
-                            capacity = capacity.min(cap1);
-                        } else if id2_has_sgl {
-                            capacity = capacity.min(cap2);
-                        }
-                        if capacity > 0.0 {
-                            let class = match (type1, type2) {
-                                (OrbitType::LEO, OrbitType::LEO) => 2,
-                                (OrbitType::LEO, _) | (_, OrbitType::LEO) => 1,
-                                _ => 0,
-                            };
-                            candidate_isls.push((class, capacity, i, j));
-                        }
-                    }
-                }
-            }
-
-            // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
-            if !self.prioritize_relay {
-                for i in 0..all_sats.len() {
-                    let (_, type_i, _) = &all_sats[i];
-                    if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
-                        candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
-                    }
-                }
-            }
-
-            candidate_isls.sort_by(|a, b| {
-                a.0.cmp(&b.0) // class ascending
-                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)) // capacity descending
-                    .then_with(|| a.2.cmp(&b.2))
-                    .then_with(|| a.3.cmp(&b.3))
-            });
-
-            let mut leo_isl_count = std::collections::HashMap::new();
-            for (_class, capacity, i, j) in candidate_isls {
-                let (id1, type1, _) = &all_sats[i];
-
-                if j == usize::MAX {
-                    if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                        continue;
-                    }
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-
-                    let gs_idx = leo_best_gs[i];
-                    gs_throughputs[gs_idx] += capacity;
-                    total_throughput += capacity;
-                    active_sgl_links += 1;
-                    sat_has_sgl.insert(id1.clone());
-                    sat_sgl_link.insert(id1.clone(), capacity);
-                } else {
-                    let (id2, type2, _) = &all_sats[j];
-
-                    if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                        continue;
-                    }
-                    if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
-                        continue;
-                    }
-
-                    if type1 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-                    }
-                    if type2 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
-                    }
-
-                    active_isl_links += 1;
-                }
-            }
+            let net = self.calculate_network_status(&constellation, &ground_stations, current_time, false);
 
             // Write CSV row
             let mut row_str = format!("{:.1}", current_time);
-            for val in &gs_throughputs {
+            for val in &net.gs_throughputs {
                 row_str.push_str(&format!(",{}", val));
             }
-            row_str.push_str(&format!(",{},{},{}\n", total_throughput, active_isl_links, active_sgl_links));
+            row_str.push_str(&format!(
+                ",{},{},{}\n",
+                net.total_throughput, net.active_isl_links_count, net.active_sgl_links_count
+            ));
             file.write_all(row_str.as_bytes())?;
 
             current_time += step_size;
@@ -1920,7 +2072,6 @@ impl eframe::App for HydronGuiApp {
 
         // 1. Core simulation physics steps
         if self.is_running {
-            let mut pending_logs = Vec::new();
             let loops = self.time_warp.abs();
             let dt = if self.time_warp < 0 { -self.step_size } else { self.step_size };
 
@@ -1933,258 +2084,52 @@ impl eframe::App for HydronGuiApp {
                 let sun_vector = [1.0, 0.0, 0.0];
                 let b_eci_mock = [1e-5, 2e-5, -3e-5];
 
-                // Step atmosphere
-                for (idx, gs) in &mut self.ground_stations.iter_mut().enumerate() {
-                    if let Some(forced_idx) = self.weather_overrides[idx] {
-                        if gs.atmos_state != forced_idx {
-                            gs.atmos_state = forced_idx;
-                            gs.k_value = self.atmos_model.k_values[forced_idx] / 1000.0;
-                            let state_name = &self.atmos_model.states[forced_idx];
-                            pending_logs.push(format!("Weather at {} forced to {}", gs.name, state_name));
-                        }
-                    } else {
-                        let prev_state = gs.atmos_state;
-                        step_atmosphere(gs, &mut self.atmos_model);
-                        if gs.atmos_state != prev_state {
-                            let state_name = &self.atmos_model.states[gs.atmos_state];
-                            pending_logs.push(format!("Weather at {} transitioned to {}", gs.name, state_name));
-                        }
-                    }
-                }
+                let pending_logs = Self::step_simulation_state(
+                    &mut self.constellation,
+                    &mut self.ground_stations,
+                    &mut self.atmos_model,
+                    &self.weather_overrides,
+                    &self.config.env,
+                    dt,
+                    sun_vector,
+                    b_eci_mock,
+                    &self.selected_satellite_id,
+                    &mut self.force_disturbance,
+                    self.disturbance_val,
+                );
 
-                // Step satellite dynamics
-                for segment in &mut self.constellation.segments {
-                    for sat in &mut segment.satellites {
-                        let rw_torque = [1e-3, -5e-4, 2e-4];
-                        let mut mtq_dipole = [0.1, -0.05, 0.1];
-
-                        if sat.id == self.selected_satellite_id && self.force_disturbance {
-                            mtq_dipole = add(mtq_dipole, self.disturbance_val);
-                            self.force_disturbance = false;
-                            pending_logs.push(format!("Injected attitude disturbance into satellite {}", sat.id));
-                        }
-
-                        step_orbit(sat, dt, &self.config.env, sun_vector);
-                        step_attitude(sat, dt, b_eci_mock, rw_torque, mtq_dipole);
-                    }
-                }
-            }
-            for msg in pending_logs {
-                self.log(&msg);
-            }
-        }
-
-        // Pre-calculate positions and throughputs for all ground stations
-        let gst = self.current_time * 7.292115e-5;
-        let rot_mat = eci_to_ecef_matrix(gst);
-        let rot_mat_t = [
-            [rot_mat[0][0], rot_mat[1][0], rot_mat[2][0]],
-            [rot_mat[0][1], rot_mat[1][1], rot_mat[2][1]],
-            [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
-        ];
-
-        // Gather all active satellite ECI positions
-        let all_sats: Vec<(String, OrbitType, [f64; 3])> = self.constellation.segments.iter()
-            .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
-            .collect();
-
-        // Gather all GS ECI positions
-        let gs_eci_list: Vec<[f64; 3]> = self.ground_stations.iter().map(|gs| {
-            let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-            mat_vec_mult(rot_mat_t, ecef)
-        }).collect();
-
-        // Pre-calculate connected satellites for each GS and throughputs
-        let mut connected_sats_per_gs = vec![Vec::new(); self.ground_stations.len()];
-        let mut gs_throughputs = vec![0.0f32; self.ground_stations.len()];
-        let mut total_throughput = 0.0f32;
-
-        // Track best SGL for LEO satellites
-        let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
-        let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
-
-        for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
-            let sat_max = match orbit_type {
-                OrbitType::LEO => self.leo_max_bitrate,
-                OrbitType::MEO => self.meo_max_bitrate,
-                OrbitType::GEO => self.geo_max_bitrate,
-            };
-            let sat_ref_dist = match orbit_type {
-                OrbitType::LEO => self.config.ref_dist_sgl_km,
-                OrbitType::MEO => self.config.meo_alt_km,
-                OrbitType::GEO => self.config.geo_alt_km,
-            };
-            let orbit_label = match orbit_type {
-                OrbitType::LEO => "LEO",
-                OrbitType::MEO => "MEO",
-                OrbitType::GEO => "GEO",
-            };
-
-            let mut best_cap = 0.0_f64;
-            let mut best_idx = usize::MAX;
-            for (i, other_eci) in gs_eci_list.iter().enumerate() {
-                let cap = compute_link_capacity(
-                    *sat_r, *other_eci, true,
-                    self.ground_stations[i].k_value,
-                    sat_ref_dist, sat_max, &self.config.env
-                ).min(sat_max);
-                if cap > best_cap {
-                    best_cap = cap;
-                    best_idx = i;
-                }
-            }
-
-            if best_idx < self.ground_stations.len() && best_cap > 0.0 {
-                if orbit_type == &OrbitType::LEO {
-                    leo_best_gs[sat_idx] = best_idx;
-                    leo_best_gs_cap[sat_idx] = best_cap;
-                } else {
-                    connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_label, best_cap, sat_max));
-                    gs_throughputs[best_idx] += best_cap as f32;
-                    total_throughput += best_cap as f32;
+                for msg in pending_logs {
+                    self.log(&msg);
                 }
             }
         }
 
-        let mut sat_has_sgl = std::collections::HashSet::new();
-        let mut sat_sgl_link = std::collections::HashMap::new();
-        for (gs_idx, gs_conn) in connected_sats_per_gs.iter().enumerate() {
-            let gs_name = &self.ground_stations[gs_idx].name;
-            for (sat_id, _, cap, _) in gs_conn {
-                sat_has_sgl.insert(sat_id.clone());
-                sat_sgl_link.insert(sat_id.clone(), (gs_name.clone(), *cap));
-            }
-        }
+        let net = self.calculate_network_status(
+            &self.constellation,
+            &self.ground_stations,
+            self.current_time,
+            true,
+        );
 
-        // Pre-calculate active ISL links
-        let mut candidate_isls = Vec::new();
-        for i in 0..all_sats.len() {
-            for j in (i + 1)..all_sats.len() {
-                let (id1, type1, r1) = &all_sats[i];
-                let (id2, type2, r2) = &all_sats[j];
+        let connected_sats_per_gs = net
+            .connected_sats_per_gs
+            .iter()
+            .map(|conns| {
+                conns
+                    .iter()
+                    .map(|(id, label, cap, max)| (id.clone(), label.as_str(), *cap, *max))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
 
-                let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
-                let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
-                let mut is_allowed = id1_has_sgl || id2_has_sgl;
-                if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
-                    is_allowed = false;
-                }
-                if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
-                    is_allowed = false;
-                }
-
-                let show_link = match (type1, type2) {
-                    (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
-                    (OrbitType::MEO, OrbitType::MEO) => self.show_meo,
-                    (OrbitType::GEO, OrbitType::GEO) => self.show_geo,
-                    _ => self.show_meo || self.show_geo || self.show_leo,
-                } && is_allowed;
-
-                if show_link && visible(*r1, *r2, self.config.env.r_earth) {
-                    let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
-                    let capacity = if is_leo {
-                        self.leo_max_bitrate
-                    } else {
-                        let sat_max1 = match type1 {
-                            OrbitType::LEO => self.leo_max_bitrate,
-                            OrbitType::MEO => self.meo_max_bitrate,
-                            OrbitType::GEO => self.geo_max_bitrate,
-                        };
-                        let sat_max2 = match type2 {
-                            OrbitType::LEO => self.leo_max_bitrate,
-                            OrbitType::MEO => self.meo_max_bitrate,
-                            OrbitType::GEO => self.geo_max_bitrate,
-                        };
-                        let nominal_capacity = sat_max1.min(sat_max2);
-                        let sat_ref_dist = match type1 {
-                            OrbitType::LEO => self.config.ref_dist_isl_km,
-                            OrbitType::MEO => self.config.meo_alt_km,
-                            OrbitType::GEO => self.config.geo_alt_km,
-                        };
-                        compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
-                    };
-                    let mut capacity = capacity;
-                    let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).map(|x| x.1).unwrap_or(0.0) };
-                    let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).map(|x| x.1).unwrap_or(0.0) };
-
-                    if id1_has_sgl && id2_has_sgl {
-                        capacity = capacity.min(cap1.max(cap2));
-                    } else if id1_has_sgl {
-                        capacity = capacity.min(cap1);
-                    } else if id2_has_sgl {
-                        capacity = capacity.min(cap2);
-                    }
-                    if capacity > 0.0 {
-                        let class = match (type1, type2) {
-                            (OrbitType::LEO, OrbitType::LEO) => 2,
-                            (OrbitType::LEO, _) | (_, OrbitType::LEO) => 1,
-                            _ => 0,
-                        };
-                        candidate_isls.push((class, capacity, i, j));
-                    }
-                }
-            }
-        }
-
-        // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
-        if !self.prioritize_relay {
-            for i in 0..all_sats.len() {
-                let (_, type_i, _) = &all_sats[i];
-                if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
-                    candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
-                }
-            }
-        }
-
-        candidate_isls.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
-                .then_with(|| a.2.cmp(&b.2))
-                .then_with(|| a.3.cmp(&b.3))
-        });
-
-        let mut leo_isl_count = std::collections::HashMap::new();
-        let mut active_isls = Vec::new();
-        let mut sat_isl_link = std::collections::HashMap::new();
-
-        for (_class, capacity, i, j) in candidate_isls {
-            let (id1, type1, _) = &all_sats[i];
-
-            if j == usize::MAX {
-                if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-                *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-
-                let gs_idx = leo_best_gs[i];
-                let gs_name = &self.ground_stations[gs_idx].name;
-                connected_sats_per_gs[gs_idx].push((id1.clone(), "LEO", capacity, self.leo_max_bitrate));
-                gs_throughputs[gs_idx] += capacity as f32;
-                total_throughput += capacity as f32;
-                sat_has_sgl.insert(id1.clone());
-                sat_sgl_link.insert(id1.clone(), (gs_name.clone(), capacity));
-            } else {
-                let (id2, type2, _) = &all_sats[j];
-
-                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-
-                if type1 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-                }
-                if type2 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
-                }
-
-                active_isls.push((i, j, capacity));
-                sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
-                sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
-            }
-        }
+        let gs_throughputs: Vec<f32> = net.gs_throughputs.iter().map(|&x| x as f32).collect();
+        let total_throughput = net.total_throughput as f32;
+        let active_isls = net.active_isls;
+        let sat_sgl_link = net.sat_sgl_link;
+        let sat_isl_link = net.sat_isl_link;
+        let gst = net.gst;
+        let all_sats = net.all_sats;
+        let gs_eci_list = net.gs_eci_list;
 
         // Update history if running
         if self.is_running {
