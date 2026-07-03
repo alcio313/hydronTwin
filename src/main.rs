@@ -182,6 +182,11 @@ fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
+// Vector subtraction
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
 // Vector scaling
 fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
@@ -199,8 +204,7 @@ fn normalize_q(q: [f64; 4]) -> [f64; 4] {
 
 // ECI to ECEF rotation matrix at GST
 fn eci_to_ecef_matrix(gst: f64) -> [[f64; 3]; 3] {
-    let c = gst.cos();
-    let s = gst.sin();
+    let (s, c) = gst.sin_cos();
     [
         [c, s, 0.0],
         [-s, c, 0.0],
@@ -234,12 +238,12 @@ pub fn lla_to_ecef(lat_rad: f64, lon_rad: f64, alt_m: f64) -> [f64; 3] {
     let f = 1.0 / 298.257223563; // Flattening
     let e2 = f * (2.0 - f);
     
-    let sin_lat = lat_rad.sin();
-    let cos_lat = lat_rad.cos();
+    let (sin_lat, cos_lat) = lat_rad.sin_cos();
+    let (sin_lon, cos_lon) = lon_rad.sin_cos();
     let n = a / (1.0 - e2 * sin_lat * sin_lat).sqrt();
     
-    let x = (n + alt_m) * cos_lat * lon_rad.cos();
-    let y = (n + alt_m) * cos_lat * lon_rad.sin();
+    let x = (n + alt_m) * cos_lat * cos_lon;
+    let y = (n + alt_m) * cos_lat * sin_lon;
     let z = (n * (1.0 - e2) + alt_m) * sin_lat;
     
     [x, y, z]
@@ -250,18 +254,18 @@ pub fn lla_to_ecef(lat_rad: f64, lon_rad: f64, alt_m: f64) -> [f64; 3] {
 /// `obs_lat` and `obs_lon` are in radians.
 fn az_el_dist(obs_r: [f64; 3], obs_lat: f64, obs_lon: f64, tgt_r: [f64; 3]) -> (f64, f64, f64) {
     // Range vector in ECI
-    let dr = [tgt_r[0]-obs_r[0], tgt_r[1]-obs_r[1], tgt_r[2]-obs_r[2]];
+    let dr = sub(tgt_r, obs_r);
     let dist_m = norm(dr);
     if dist_m < 1.0 { return (0.0, 0.0, 0.0); }
-    let dr_u = normalize(dr);
+    let dr_u = scale(dr, 1.0 / dist_m);
 
     // NED unit vectors at observer (ECI, Earth assumed non-rotating for instantaneous geometry)
-    // N: north = d(obs_r_unit)/d(lat) at obs position
-    let (sin_lat, cos_lat) = (obs_lat.sin(), obs_lat.cos());
-    let (sin_lon, cos_lon) = (obs_lon.sin(), obs_lon.cos());
-    let north = [-sin_lat*cos_lon, -sin_lat*sin_lon, cos_lat];
+    let (sin_lat, cos_lat) = obs_lat.sin_cos();
+    let (sin_lon, cos_lon) = obs_lon.sin_cos();
+
     let east  = [-sin_lon,          cos_lon,           0.0  ];
     let up    = [ cos_lat*cos_lon,  cos_lat*sin_lon,  sin_lat];
+    let north = cross(up, east);
 
     let d_n = dot(dr_u, north);
     let d_e = dot(dr_u, east);
@@ -729,18 +733,14 @@ pub fn step_atmosphere(gs: &mut GroundStation, model: &mut AtmosphereModel) {
 
 // 4. visible: Evaluates geometric LoS between two space nodes (ISL). Uses r_earth+100km buffer.
 pub fn visible(r1: [f64; 3], r2: [f64; 3], r_earth: f64) -> bool {
-    let d = [r2[0] - r1[0], r2[1] - r1[1], r2[2] - r1[2]];
+    let d = sub(r2, r1);
     let d_len_sq = dot(d, d);
     if d_len_sq == 0.0 { return true; }
     let u_min = -dot(r1, d) / d_len_sq;
     // Ray occultation height limit: 100 km for ISL atmospheric blockage.
     let r_occult = r_earth + 100_000.0;
     if (0.0..=1.0).contains(&u_min) {
-        let closest_point = [
-            r1[0] + u_min * d[0],
-            r1[1] + u_min * d[1],
-            r1[2] + u_min * d[2]
-        ];
+        let closest_point = add(r1, scale(d, u_min));
         norm(closest_point) >= r_occult
     } else {
         norm(r1) >= r_occult && norm(r2) >= r_occult
@@ -751,7 +751,7 @@ pub fn visible(r1: [f64; 3], r2: [f64; 3], r_earth: f64) -> bool {
 // A GS is always at norm ≈ r_earth, so we cannot require norm(GS) >= r_earth+100km.
 // Instead: link is blocked only if the interior of the segment dips below r_earth.
 pub fn visible_sgl(r_sat: [f64; 3], r_gs: [f64; 3], r_earth: f64) -> bool {
-    let d = [r_sat[0] - r_gs[0], r_sat[1] - r_gs[1], r_sat[2] - r_gs[2]];
+    let d = sub(r_sat, r_gs);
     let d_len_sq = dot(d, d);
     if d_len_sq == 0.0 { return false; }
     // u_min: parameter of closest approach along the GS→Sat segment
@@ -765,11 +765,7 @@ pub fn visible_sgl(r_sat: [f64; 3], r_gs: [f64; 3], r_earth: f64) -> bool {
         return true;
     }
     // Interior closest point: check it doesn't go through the solid Earth
-    let closest = [
-        r_gs[0] + u_min * d[0],
-        r_gs[1] + u_min * d[1],
-        r_gs[2] + u_min * d[2],
-    ];
+    let closest = add(r_gs, scale(d, u_min));
     norm(closest) >= r_earth
 }
 
@@ -783,7 +779,7 @@ pub fn compute_link_capacity(
     nominal_capacity: f64,
     env: &SimEnvironment,
 ) -> f64 {
-    let d_vec = [r_to[0] - r_from[0], r_to[1] - r_from[1], r_to[2] - r_from[2]];
+    let d_vec = sub(r_to, r_from);
     let d_m = norm(d_vec);
 
     // Use correct visibility check: SGL endpoints are on Earth's surface
@@ -804,7 +800,7 @@ pub fn compute_link_capacity(
         let r_gs = if norm(r_from) < norm(r_to) { r_from } else { r_to };
         let r_sat = if norm(r_from) < norm(r_to) { r_to } else { r_from };
         // Direction vector must point from ground station to satellite for slant path calculation
-        let dir = normalize([r_sat[0] - r_gs[0], r_sat[1] - r_gs[1], r_sat[2] - r_gs[2]]);
+        let dir = normalize(sub(r_sat, r_gs));
         
         let r_gs_len = norm(r_gs);
         let r_atm = env.r_earth + 10_000.0; // Weather/troposphere boundary at 10 km for realistic attenuation
