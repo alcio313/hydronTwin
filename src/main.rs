@@ -4472,3 +4472,68 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mat_vec_mult_identity() {
+        let m = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let v = [1.0, 2.0, 3.0];
+        let res = mat_vec_mult(m, v);
+        assert_eq!(res, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_mat_vec_mult_zero_vector() {
+        let m = [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ];
+        let v = [0.0, 0.0, 0.0];
+        let res = mat_vec_mult(m, v);
+        assert_eq!(res, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_mat_vec_mult_zero_matrix() {
+        let m = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let v = [1.0, 2.0, 3.0];
+        let res = mat_vec_mult(m, v);
+        assert_eq!(res, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_mat_vec_mult_general() {
+        let m = [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ];
+        let v = [1.0, 1.0, 1.0];
+        let res = mat_vec_mult(m, v);
+        assert_eq!(res, [6.0, 15.0, 24.0]);
+    }
+
+    #[test]
+    fn test_mat_vec_mult_negative() {
+        let m = [
+            [1.0, -2.0, 3.0],
+            [-4.0, 5.0, -6.0],
+            [7.0, -8.0, 9.0],
+        ];
+        let v = [1.0, -1.0, 1.0];
+        let res = mat_vec_mult(m, v);
+        assert_eq!(res, [6.0, -15.0, 24.0]);
+    }
+}
