@@ -35,6 +35,16 @@ pub enum OrbitType {
     GEO,
 }
 
+impl OrbitType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OrbitType::LEO => "LEO",
+            OrbitType::MEO => "MEO",
+            OrbitType::GEO => "GEO",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Satellite {
     pub id: String,
@@ -1089,6 +1099,67 @@ pub struct HydronGuiApp {
 }
 
 impl HydronGuiApp {
+    fn get_all_sats_data(constellation: &Constellation) -> Vec<(String, OrbitType, [f64; 3])> {
+        constellation.segments.iter()
+            .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
+            .collect()
+    }
+
+    fn get_gs_eci_list(current_time: f64, ground_stations: &[GroundStation]) -> Vec<[f64; 3]> {
+        let gst = current_time * 7.292115e-5;
+        let rot_mat = eci_to_ecef_matrix(gst);
+        let rot_mat_t = [
+            [rot_mat[0][0], rot_mat[1][0], rot_mat[2][0]],
+            [rot_mat[0][1], rot_mat[1][1], rot_mat[2][1]],
+            [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
+        ];
+
+        ground_stations.iter().map(|gs| {
+            let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+            mat_vec_mult(rot_mat_t, ecef)
+        }).collect()
+    }
+
+    fn calculate_best_sgl_links(
+        &self,
+        all_sats: &[(String, OrbitType, [f64; 3])],
+        gs_eci_list: &[[f64; 3]],
+        ground_stations: &[GroundStation],
+    ) -> Vec<Option<(usize, f64)>> {
+        all_sats.iter().map(|(_, orbit_type, sat_r)| {
+            let sat_max = match orbit_type {
+                OrbitType::LEO => self.leo_max_bitrate,
+                OrbitType::MEO => self.meo_max_bitrate,
+                OrbitType::GEO => self.geo_max_bitrate,
+            };
+            let sat_ref_dist = match orbit_type {
+                OrbitType::LEO => self.config.ref_dist_sgl_km,
+                OrbitType::MEO => self.config.meo_alt_km,
+                OrbitType::GEO => self.config.geo_alt_km,
+            };
+
+            let mut best_cap = 0.0_f64;
+            let mut best_idx = usize::MAX;
+            for (i, other_eci) in gs_eci_list.iter().enumerate() {
+                let cap = compute_link_capacity(
+                    *sat_r, *other_eci, true,
+                    ground_stations[i].k_value,
+                    sat_ref_dist, sat_max, &self.config.env
+                ).min(sat_max);
+                if cap > best_cap {
+                    best_cap = cap;
+                    best_idx = i;
+                }
+            }
+
+            if best_idx < ground_stations.len() && best_cap > 0.0 {
+                Some((best_idx, best_cap))
+            } else {
+                None
+            }
+        }).collect()
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
         // Setup visual theme matching high-end digital twins (dark slate palette)
         let mut visuals = egui::Visuals::dark();
@@ -1322,22 +1393,8 @@ impl HydronGuiApp {
             }
 
             // 3. Calculate positions and throughputs
-            let gst = current_time * 7.292115e-5;
-            let rot_mat = eci_to_ecef_matrix(gst);
-            let rot_mat_t = [
-                [rot_mat[0][0], rot_mat[1][0], rot_mat[2][0]],
-                [rot_mat[0][1], rot_mat[1][1], rot_mat[2][1]],
-                [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
-            ];
-
-            let all_sats: Vec<(String, OrbitType, [f64; 3])> = constellation.segments.iter()
-                .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
-                .collect();
-
-            let gs_eci_list: Vec<[f64; 3]> = ground_stations.iter().map(|gs| {
-                let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-                mat_vec_mult(rot_mat_t, ecef)
-            }).collect();
+            let all_sats = Self::get_all_sats_data(&constellation);
+            let gs_eci_list = Self::get_gs_eci_list(current_time, &ground_stations);
 
             let mut gs_throughputs = vec![0.0; ground_stations.len()];
             let mut total_throughput = 0.0;
@@ -1352,33 +1409,10 @@ impl HydronGuiApp {
             let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
 
             // SGL links capacity
-            for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
-                let sat_max = match orbit_type {
-                    OrbitType::LEO => self.leo_max_bitrate,
-                    OrbitType::MEO => self.meo_max_bitrate,
-                    OrbitType::GEO => self.geo_max_bitrate,
-                };
-                let sat_ref_dist = match orbit_type {
-                    OrbitType::LEO => self.config.ref_dist_sgl_km,
-                    OrbitType::MEO => self.config.meo_alt_km,
-                    OrbitType::GEO => self.config.geo_alt_km,
-                };
-
-                let mut best_cap = 0.0_f64;
-                let mut best_idx = usize::MAX;
-                for (i, other_eci) in gs_eci_list.iter().enumerate() {
-                    let cap = compute_link_capacity(
-                        *sat_r, *other_eci, true,
-                        ground_stations[i].k_value,
-                        sat_ref_dist, sat_max, &self.config.env
-                    ).min(sat_max);
-                    if cap > best_cap {
-                        best_cap = cap;
-                        best_idx = i;
-                    }
-                }
-
-                if best_idx < ground_stations.len() && best_cap > 0.0 {
+            let sgl_results = self.calculate_best_sgl_links(&all_sats, &gs_eci_list, &ground_stations);
+            for (sat_idx, res) in sgl_results.into_iter().enumerate() {
+                if let Some((best_idx, best_cap)) = res {
+                    let (sat_id, orbit_type, _) = &all_sats[sat_idx];
                     if orbit_type == &OrbitType::LEO {
                         leo_best_gs[sat_idx] = best_idx;
                         leo_best_gs_cap[sat_idx] = best_cap;
@@ -1976,23 +2010,8 @@ impl eframe::App for HydronGuiApp {
 
         // Pre-calculate positions and throughputs for all ground stations
         let gst = self.current_time * 7.292115e-5;
-        let rot_mat = eci_to_ecef_matrix(gst);
-        let rot_mat_t = [
-            [rot_mat[0][0], rot_mat[1][0], rot_mat[2][0]],
-            [rot_mat[0][1], rot_mat[1][1], rot_mat[2][1]],
-            [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
-        ];
-
-        // Gather all active satellite ECI positions
-        let all_sats: Vec<(String, OrbitType, [f64; 3])> = self.constellation.segments.iter()
-            .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
-            .collect();
-
-        // Gather all GS ECI positions
-        let gs_eci_list: Vec<[f64; 3]> = self.ground_stations.iter().map(|gs| {
-            let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-            mat_vec_mult(rot_mat_t, ecef)
-        }).collect();
+        let all_sats = Self::get_all_sats_data(&self.constellation);
+        let gs_eci_list = Self::get_gs_eci_list(self.current_time, &self.ground_stations);
 
         // Pre-calculate connected satellites for each GS and throughputs
         let mut connected_sats_per_gs = vec![Vec::new(); self.ground_stations.len()];
@@ -2003,43 +2022,21 @@ impl eframe::App for HydronGuiApp {
         let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
         let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
 
-        for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
-            let sat_max = match orbit_type {
-                OrbitType::LEO => self.leo_max_bitrate,
-                OrbitType::MEO => self.meo_max_bitrate,
-                OrbitType::GEO => self.geo_max_bitrate,
-            };
-            let sat_ref_dist = match orbit_type {
-                OrbitType::LEO => self.config.ref_dist_sgl_km,
-                OrbitType::MEO => self.config.meo_alt_km,
-                OrbitType::GEO => self.config.geo_alt_km,
-            };
-            let orbit_label = match orbit_type {
-                OrbitType::LEO => "LEO",
-                OrbitType::MEO => "MEO",
-                OrbitType::GEO => "GEO",
-            };
+        let sgl_results = self.calculate_best_sgl_links(&all_sats, &gs_eci_list, &self.ground_stations);
+        for (sat_idx, res) in sgl_results.into_iter().enumerate() {
+            if let Some((best_idx, best_cap)) = res {
+                let (sat_id, orbit_type, _) = &all_sats[sat_idx];
+                let sat_max = match orbit_type {
+                    OrbitType::LEO => self.leo_max_bitrate,
+                    OrbitType::MEO => self.meo_max_bitrate,
+                    OrbitType::GEO => self.geo_max_bitrate,
+                };
 
-            let mut best_cap = 0.0_f64;
-            let mut best_idx = usize::MAX;
-            for (i, other_eci) in gs_eci_list.iter().enumerate() {
-                let cap = compute_link_capacity(
-                    *sat_r, *other_eci, true,
-                    self.ground_stations[i].k_value,
-                    sat_ref_dist, sat_max, &self.config.env
-                ).min(sat_max);
-                if cap > best_cap {
-                    best_cap = cap;
-                    best_idx = i;
-                }
-            }
-
-            if best_idx < self.ground_stations.len() && best_cap > 0.0 {
                 if orbit_type == &OrbitType::LEO {
                     leo_best_gs[sat_idx] = best_idx;
                     leo_best_gs_cap[sat_idx] = best_cap;
                 } else {
-                    connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_label, best_cap, sat_max));
+                    connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_type.as_str(), best_cap, sat_max));
                     gs_throughputs[best_idx] += best_cap as f32;
                     total_throughput += best_cap as f32;
                 }
