@@ -4472,3 +4472,41 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cross() {
+        let i = [1.0, 0.0, 0.0];
+        let j = [0.0, 1.0, 0.0];
+        let k = [0.0, 0.0, 1.0];
+        let zero = [0.0, 0.0, 0.0];
+
+        // Basis vectors
+        assert_eq!(cross(i, j), k);
+        assert_eq!(cross(j, k), i);
+        assert_eq!(cross(k, i), j);
+
+        // Anti-commutativity
+        assert_eq!(cross(j, i), [0.0, 0.0, -1.0]);
+
+        // Zero vector
+        let a = [1.0, 2.0, 3.0];
+        assert_eq!(cross(a, zero), zero);
+        assert_eq!(cross(zero, a), zero);
+
+        // Collinear vectors
+        assert_eq!(cross(a, a), zero);
+        let a2 = [2.0, 4.0, 6.0];
+        assert_eq!(cross(a, a2), zero);
+
+        // General vectors
+        let b = [4.0, 5.0, 6.0];
+        // a[1]*b[2] - a[2]*b[1] = 2*6 - 3*5 = 12 - 15 = -3
+        // a[2]*b[0] - a[0]*b[2] = 3*4 - 1*6 = 12 - 6 = 6
+        // a[0]*b[1] - a[1]*b[0] = 1*5 - 2*4 = 5 - 8 = -3
+        assert_eq!(cross(a, b), [-3.0, 6.0, -3.0]);
+    }
+}
