@@ -4472,3 +4472,49 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    fn assert_approx_eq(actual: [f64; 3], expected: [f64; 3], epsilon: f64) {
+        for i in 0..3 {
+            assert!(
+                (actual[i] - expected[i]).abs() < epsilon,
+                "Value at index {} differs: actual={:?}, expected={:?}, diff={}",
+                i, actual, expected, (actual[i] - expected[i]).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn test_lla_to_ecef_equator_prime_meridian() {
+        let res = lla_to_ecef(0.0, 0.0, 0.0);
+        assert_approx_eq(res, [6378137.0, 0.0, 0.0], 1e-6);
+    }
+
+    #[test]
+    fn test_lla_to_ecef_north_pole() {
+        let res = lla_to_ecef(PI / 2.0, 0.0, 0.0);
+        assert_approx_eq(res, [0.0, 0.0, 6356752.314245179], 1e-6);
+    }
+
+    #[test]
+    fn test_lla_to_ecef_south_pole() {
+        let res = lla_to_ecef(-PI / 2.0, 0.0, 0.0);
+        assert_approx_eq(res, [0.0, 0.0, -6356752.314245179], 1e-6);
+    }
+
+    #[test]
+    fn test_lla_to_ecef_equator_90east() {
+        let res = lla_to_ecef(0.0, PI / 2.0, 0.0);
+        assert_approx_eq(res, [0.0, 6378137.0, 0.0], 1e-6);
+    }
+
+    #[test]
+    fn test_lla_to_ecef_with_altitude() {
+        let res = lla_to_ecef(0.0, 0.0, 1000.0);
+        assert_approx_eq(res, [6379137.0, 0.0, 0.0], 1e-6);
+    }
+}
