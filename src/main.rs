@@ -4472,3 +4472,42 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rotate_vector_q_identity() {
+        let q = [1.0, 0.0, 0.0, 0.0];
+        let v = [1.0, 2.0, 3.0];
+        let result = rotate_vector_q(q, v);
+        assert!((result[0] - v[0]).abs() < 1e-12);
+        assert!((result[1] - v[1]).abs() < 1e-12);
+        assert!((result[2] - v[2]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_rotate_vector_q_90deg_z() {
+        // 90 degrees around Z axis
+        // q = [cos(45deg), 0, 0, sin(45deg)]
+        let angle = 90.0f64.to_radians();
+        let q = [(angle/2.0).cos(), 0.0, 0.0, (angle/2.0).sin()];
+        let v = [1.0, 0.0, 0.0];
+        let result = rotate_vector_q(q, v);
+        // Should be [0, 1, 0]
+        assert!((result[0] - 0.0).abs() < 1e-12);
+        assert!((result[1] - 1.0).abs() < 1e-12);
+        assert!((result[2] - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_rotate_vector_q_norm_preservation() {
+        let q = normalize_q([1.0, 2.0, 3.0, 4.0]);
+        let v = [1.0, 2.0, 3.0];
+        let v_norm = norm(v);
+        let result = rotate_vector_q(q, v);
+        let result_norm = norm(result);
+        assert!((v_norm - result_norm).abs() < 1e-12);
+    }
+}
