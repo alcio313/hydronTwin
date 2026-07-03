@@ -4472,3 +4472,33 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dot() {
+        assert_eq!(dot([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]), 1.0);
+        assert_eq!(dot([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), 32.0);
+        assert_eq!(dot([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn test_norm() {
+        assert_eq!(norm([0.0, 0.0, 0.0]), 0.0);
+        assert_eq!(norm([3.0, 4.0, 0.0]), 5.0);
+        assert!((norm([1.0, 1.0, 1.0]) - 3.0_f64.sqrt()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_normalize() {
+        assert_eq!(normalize([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        let n = normalize([3.0, 4.0, 0.0]);
+        assert!((n[0] - 0.6).abs() < 1e-15);
+        assert!((n[1] - 0.8).abs() < 1e-15);
+        assert_eq!(n[2], 0.0);
+
+        let unit = normalize([10.0, 0.0, 0.0]);
+        assert_eq!(unit, [1.0, 0.0, 0.0]);
+    }
+}
