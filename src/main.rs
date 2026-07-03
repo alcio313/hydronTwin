@@ -4472,3 +4472,124 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_config_full() {
+        let toml_content = r#"
+[constellation]
+name = "TestConstellation"
+
+[constellation.leo]
+num_satellites = 15
+altitude_km = 600.0
+inclination_deg = 45.0
+mass_kg = 25.0
+cross_section_area_m2 = 0.2
+cd = 2.0
+cr = 1.0
+
+[ground.stations]
+id = "GS1"
+name = "Station 1"
+lat_deg = 10.0
+lon_deg = 20.0
+alt_m = 100.0
+downlink_nominal_gbps = 50.0
+
+[atmosphere]
+states = ["state1", "state2"]
+k_values_per_km = [0.1, 0.5]
+
+[environment]
+mu = 3.98e14
+r_earth = 6371000.0
+j2 = 0.00108
+rho0_500km = 4.0e-12
+h0_km = 450.0
+scale_height_km = 60.0
+p_srp = 4.0e-6
+
+[digital_twin]
+time_step_s = 2.0
+ref_distance_isl_km = 1200.0
+ref_distance_sgl_km = 800.0
+"#;
+        let config = parse_config_from_str(toml_content).unwrap();
+        assert_eq!(config.name, "TestConstellation");
+        assert_eq!(config.leo_num, 15);
+        assert_eq!(config.leo_alt_km, 600.0);
+        assert_eq!(config.leo_inc_deg, 45.0);
+        assert_eq!(config.stations.len(), 1);
+        assert_eq!(config.stations[0].id, "GS1");
+        assert_eq!(config.atmos_states, vec!["state1", "state2"]);
+        assert_eq!(config.env.mu, 3.98e14);
+        assert_eq!(config.dt_time_step, 2.0);
+        assert_eq!(config.ref_dist_isl_km, 1200.0);
+        assert_eq!(config.ref_dist_sgl_km, 800.0);
+        assert_eq!(config.env.rho0_500km, 4.0e-12);
+        assert_eq!(config.env.h0_km, 450.0);
+        assert_eq!(config.env.scale_height_km, 60.0);
+        assert_eq!(config.env.p_srp, 4.0e-6);
+    }
+
+    #[test]
+    fn test_parse_config_minimal() {
+        let config = parse_config_from_str("").unwrap();
+        // Verify some default values
+        assert_eq!(config.name, "HydRON");
+        assert_eq!(config.leo_num, 10);
+        assert_eq!(config.leo_alt_km, 550.0);
+        assert_eq!(config.stations.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_config_malformed_values() {
+        let toml_content = r#"
+[constellation.leo]
+num_satellites = "invalid"
+altitude_km = "not_a_number"
+"#;
+        let config = parse_config_from_str(toml_content).unwrap();
+        // Should fall back to defaults
+        assert_eq!(config.leo_num, 10);
+        assert_eq!(config.leo_alt_km, 550.0);
+    }
+
+    #[test]
+    fn test_parse_config_multiple_stations() {
+        let toml_content = r#"
+[[ground.stations]]
+id = "GS1"
+name = "Station 1"
+
+[[ground.stations]]
+id = "GS2"
+name = "Station 2"
+"#;
+        let config = parse_config_from_str(toml_content).unwrap();
+        assert_eq!(config.stations.len(), 2);
+        assert_eq!(config.stations[0].id, "GS1");
+        assert_eq!(config.stations[1].id, "GS2");
+    }
+
+    #[test]
+    fn test_parse_config_infinity_capacity() {
+        let toml_content = r#"
+[[ground.stations]]
+id = "GS1"
+downlink_nominal_gbps = "inf"
+
+[[ground.stations]]
+id = "GS2"
+downlink_nominal_gbps = "unlimited"
+"#;
+        let config = parse_config_from_str(toml_content).unwrap();
+        assert_eq!(config.stations.len(), 2);
+        assert!(config.stations[0].downlink_nominal_gbps.is_infinite());
+        assert!(config.stations[1].downlink_nominal_gbps.is_infinite());
+    }
+}
