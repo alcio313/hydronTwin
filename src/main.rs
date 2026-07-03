@@ -4472,3 +4472,47 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_visible_sgl_directly_overhead() {
+        let r_earth = 6378137.0;
+        let r_gs = [r_earth, 0.0, 0.0];
+        let r_sat = [r_earth + 500000.0, 0.0, 0.0];
+        assert!(visible_sgl(r_sat, r_gs, r_earth));
+    }
+
+    #[test]
+    fn test_visible_sgl_opposite_side() {
+        let r_earth = 6378137.0;
+        let r_gs = [r_earth, 0.0, 0.0];
+        let r_sat = [-r_earth - 500000.0, 0.0, 0.0];
+        assert!(!visible_sgl(r_sat, r_gs, r_earth));
+    }
+
+    #[test]
+    fn test_visible_sgl_at_horizon() {
+        let r_earth = 6378137.0;
+        let r_gs = [r_earth, 0.0, 0.0];
+        let r_sat = [r_earth, 1000000.0, 0.0];
+        assert!(visible_sgl(r_sat, r_gs, r_earth));
+    }
+
+    #[test]
+    fn test_visible_sgl_just_below_horizon() {
+        let r_earth = 6378137.0;
+        let r_gs = [r_earth, 0.0, 0.0];
+        let r_sat = [r_earth - 100.0, 1000000.0, 0.0];
+        assert!(!visible_sgl(r_sat, r_gs, r_earth));
+    }
+
+    #[test]
+    fn test_visible_sgl_same_position() {
+        let r_earth = 6378137.0;
+        let r_gs = [r_earth, 0.0, 0.0];
+        let r_sat = [r_earth, 0.0, 0.0];
+        assert!(!visible_sgl(r_sat, r_gs, r_earth));
+    }
+}
