@@ -4472,3 +4472,102 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_config_basic() {
+        let toml = r#"
+[constellation]
+name = "TestConst"
+[constellation.leo]
+num_satellites = 42
+altitude_km = 600.0
+"#;
+        let config = parse_config_from_str(toml).unwrap();
+        assert_eq!(config.name, "TestConst");
+        assert_eq!(config.leo_num, 42);
+        assert!((config.leo_alt_km - 600.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_parse_config_ground_stations() {
+        let toml = r#"
+[[ground.stations]]
+id = "G1"
+name = "Station 1"
+lat_deg = 45.0
+lon_deg = 90.0
+alt_m = 100.0
+downlink_nominal_gbps = 20.0
+
+[[ground.stations]]
+id = "G2"
+name = "Station 2"
+downlink_nominal_gbps = "unlimited"
+"#;
+        let config = parse_config_from_str(toml).unwrap();
+        assert_eq!(config.stations.len(), 2);
+
+        assert_eq!(config.stations[0].id, "G1");
+        assert_eq!(config.stations[0].name, "Station 1");
+        assert!((config.stations[0].lat_rad - 45.0f64.to_radians()).abs() < 1e-6);
+        assert!((config.stations[0].downlink_nominal_gbps - 20.0).abs() < 1e-6);
+
+        assert_eq!(config.stations[1].id, "G2");
+        assert_eq!(config.stations[1].downlink_nominal_gbps, f64::INFINITY);
+    }
+
+    #[test]
+    fn test_parse_config_defaults() {
+        let config = parse_config_from_str("").unwrap();
+        assert_eq!(config.name, "HydRON");
+        assert_eq!(config.leo_num, 10);
+        assert!((config.leo_alt_km - 550.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_parse_config_arrays() {
+        let toml = r#"
+[constellation.meo]
+raans_deg = [10.0, 20.0]
+[constellation.geo]
+longitudes_deg = [30.0]
+[atmosphere]
+states = ["clear", "cloudy"]
+k_values_per_km = [0.05, 0.5]
+"#;
+        let config = parse_config_from_str(toml).unwrap();
+        assert_eq!(config.meo_raans, vec![10.0, 20.0]);
+        assert_eq!(config.geo_lons, vec![30.0]);
+        assert_eq!(config.atmos_states, vec!["clear".to_string(), "cloudy".to_string()]);
+        assert_eq!(config.atmos_k, vec![0.05, 0.5]);
+    }
+
+    #[test]
+    fn test_parse_config_environment_and_twin() {
+        let toml = r#"
+[environment]
+mu = 3.98e14
+[digital_twin]
+time_step_s = 2.0
+"#;
+        let config = parse_config_from_str(toml).unwrap();
+        assert!((config.env.mu - 3.98e14).abs() < 1e-6);
+        assert!((config.dt_time_step - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_parse_config_edge_cases() {
+        let toml = r#"
+# Comment line
+[constellation]
+  name   =   " Messy Name "
+"#;
+        let config = parse_config_from_str(toml).unwrap();
+        assert_eq!(config.name, " Messy Name ");
+    }
+}
