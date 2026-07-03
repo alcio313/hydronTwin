@@ -4472,3 +4472,96 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    fn assert_matrix_eq(a: [[f64; 3]; 3], b: [[f64; 3]; 3], eps: f64) {
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((a[i][j] - b[i][j]).abs() < eps, "Matrix mismatch at [{}][{}]: expected {}, got {}", i, j, b[i][j], a[i][j]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_eci_to_ecef_identity() {
+        let gst = 0.0;
+        let m = eci_to_ecef_matrix(gst);
+        let identity = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        assert_matrix_eq(m, identity, 1e-12);
+    }
+
+    #[test]
+    fn test_eci_to_ecef_90_deg() {
+        let gst = PI / 2.0;
+        let m = eci_to_ecef_matrix(gst);
+        // cos(pi/2) = 0, sin(pi/2) = 1
+        // [ 0, 1, 0]
+        // [-1, 0, 0]
+        // [ 0, 0, 1]
+        let expected = [
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        assert_matrix_eq(m, expected, 1e-12);
+
+        let x = [1.0, 0.0, 0.0];
+        let y = [0.0, 1.0, 0.0];
+        let mx = mat_vec_mult(m, x);
+        let my = mat_vec_mult(m, y);
+
+        // mx = [0*1 + 1*0 + 0*0, -1*1 + 0*0 + 0*0, 0*1 + 0*0 + 1*0] = [0, -1, 0]
+        // my = [0*0 + 1*1 + 0*0, -1*0 + 0*1 + 0*0, 0*0 + 0*1 + 1*0] = [1, 0, 0]
+        assert!((mx[0] - 0.0).abs() < 1e-12);
+        assert!((mx[1] - (-1.0)).abs() < 1e-12);
+        assert!((mx[2] - 0.0).abs() < 1e-12);
+
+        assert!((my[0] - 1.0).abs() < 1e-12);
+        assert!((my[1] - 0.0).abs() < 1e-12);
+        assert!((my[2] - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_eci_to_ecef_properties() {
+        let gst = 1.2345; // arbitrary angle
+        let m = eci_to_ecef_matrix(gst);
+
+        // Determinant should be 1
+        // det = m[0][0]*(m[1][1]*m[2][2] - m[1][2]*m[2][1]) - m[0][1]*(m[1][0]*m[2][2] - m[1][2]*m[2][0]) + m[0][2]*(m[1][0]*m[2][1] - m[1][1]*m[2][0])
+        let det = m[0][0]*(m[1][1]*m[2][2] - m[1][2]*m[2][1])
+                - m[0][1]*(m[1][0]*m[2][2] - m[1][2]*m[2][0])
+                + m[0][2]*(m[1][0]*m[2][1] - m[1][1]*m[2][0]);
+        assert!((det - 1.0).abs() < 1e-12);
+
+        // Orthogonality: M * M^T = I
+        let mt = [
+            [m[0][0], m[1][0], m[2][0]],
+            [m[0][1], m[1][1], m[2][1]],
+            [m[0][2], m[1][2], m[2][2]],
+        ];
+
+        let mut res = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for k in 0..3 {
+                    res[i][j] += m[i][k] * mt[k][j];
+                }
+            }
+        }
+
+        let identity = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        assert_matrix_eq(res, identity, 1e-12);
+    }
+}
