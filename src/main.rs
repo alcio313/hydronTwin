@@ -4472,3 +4472,55 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_visible_clear() {
+        let r_earth = 6378137.0;
+        let r_occult = r_earth + 100_000.0;
+        // Two points at higher altitude, LoS passes at r_occult + 500,000
+        let r1 = [r_occult + 500_000.0, 1_000_000.0, 0.0];
+        let r2 = [r_occult + 500_000.0, -1_000_000.0, 0.0];
+        assert!(visible(r1, r2, r_earth));
+    }
+
+    #[test]
+    fn test_visible_occulted() {
+        let r_earth = 6378137.0;
+        let r_occult = r_earth + 100_000.0;
+        // LoS passes at r_occult - 500,000 (well within occultation zone)
+        let r1 = [r_occult - 500_000.0, 1_000_000.0, 0.0];
+        let r2 = [r_occult - 500_000.0, -1_000_000.0, 0.0];
+        assert!(!visible(r1, r2, r_earth));
+    }
+
+    #[test]
+    fn test_visible_grazing() {
+        let r_earth = 6378137.0;
+        let r_occult = r_earth + 100_000.0;
+        // LoS passes exactly at r_occult
+        let r1 = [r_occult, 1_000_000.0, 0.0];
+        let r2 = [r_occult, -1_000_000.0, 0.0];
+        assert!(visible(r1, r2, r_earth));
+    }
+
+    #[test]
+    fn test_visible_endpoints_below() {
+        let r_earth = 6378137.0;
+        // Both points below occultation radius
+        let r1 = [r_earth + 50_000.0, 0.0, 0.0];
+        let r2 = [0.0, r_earth + 50_000.0, 0.0];
+        assert!(!visible(r1, r2, r_earth));
+    }
+
+    #[test]
+    fn test_visible_zero_distance() {
+        let r_earth = 6378137.0;
+        let r_occult = r_earth + 100_000.0;
+        let r1 = [r_occult + 500_000.0, 0.0, 0.0];
+        assert!(visible(r1, r1, r_earth));
+    }
+}
