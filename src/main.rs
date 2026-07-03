@@ -4472,3 +4472,20 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add() {
+        // Basic addition
+        assert_eq!(add([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), [5.0, 7.0, 9.0]);
+        // Addition with negative numbers
+        assert_eq!(add([1.0, -2.0, 3.0], [-4.0, 5.0, 0.0]), [-3.0, 3.0, 3.0]);
+        // Addition with zero vectors
+        assert_eq!(add([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        // Addition with one zero vector
+        assert_eq!(add([1.0, 2.0, 3.0], [0.0, 0.0, 0.0]), [1.0, 2.0, 3.0]);
+    }
+}
