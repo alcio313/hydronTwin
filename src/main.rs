@@ -4468,3 +4468,127 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_step_atmosphere_stay() {
+        let mut gs = GroundStation {
+            id: "test".to_string(),
+            name: "Test Station".to_string(),
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            alt_m: 0.0,
+            downlink_nominal_gbps: 10.0,
+            atmos_state: 0,
+            k_value: 0.0,
+        };
+
+        let mut model = AtmosphereModel {
+            states: vec!["clear".to_string(), "cloudy".to_string()],
+            k_values: vec![0.1, 1.0],
+            transition_matrix: vec![
+                vec![1.0, 0.0], // 100% chance to stay in state 0
+                vec![0.0, 1.0],
+            ],
+            lcg: Lcg::new(42),
+        };
+
+        step_atmosphere(&mut gs, &mut model);
+        assert_eq!(gs.atmos_state, 0);
+        assert_eq!(gs.k_value, 0.1 / 1000.0);
+    }
+
+    #[test]
+    fn test_step_atmosphere_transition() {
+        let mut gs = GroundStation {
+            id: "test".to_string(),
+            name: "Test Station".to_string(),
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            alt_m: 0.0,
+            downlink_nominal_gbps: 10.0,
+            atmos_state: 0,
+            k_value: 0.0,
+        };
+
+        let mut model = AtmosphereModel {
+            states: vec!["clear".to_string(), "cloudy".to_string()],
+            k_values: vec![0.1, 1.0],
+            transition_matrix: vec![
+                vec![0.0, 1.0], // 100% chance to transition to state 1
+                vec![0.0, 1.0],
+            ],
+            lcg: Lcg::new(42),
+        };
+
+        step_atmosphere(&mut gs, &mut model);
+        assert_eq!(gs.atmos_state, 1);
+        assert_eq!(gs.k_value, 1.0 / 1000.0);
+    }
+
+    #[test]
+    fn test_step_atmosphere_k_value_conversion() {
+        let mut gs = GroundStation {
+            id: "test".to_string(),
+            name: "Test Station".to_string(),
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            alt_m: 0.0,
+            downlink_nominal_gbps: 10.0,
+            atmos_state: 1,
+            k_value: 0.0,
+        };
+
+        let mut model = AtmosphereModel {
+            states: vec!["clear".to_string(), "cloudy".to_string()],
+            k_values: vec![0.1, 5.0],
+            transition_matrix: vec![
+                vec![1.0, 0.0],
+                vec![0.0, 1.0],
+            ],
+            lcg: Lcg::new(42),
+        };
+
+        step_atmosphere(&mut gs, &mut model);
+        assert_eq!(gs.k_value, 0.005); // 5.0 / 1000.0
+    }
+
+    #[test]
+    fn test_step_atmosphere_lcg_integration() {
+        let mut gs = GroundStation {
+            id: "test".to_string(),
+            name: "Test Station".to_string(),
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            alt_m: 0.0,
+            downlink_nominal_gbps: 10.0,
+            atmos_state: 0,
+            k_value: 0.0,
+        };
+
+        // Lcg::new(42).next_f64() is approx 5.8e-11
+        let mut model = AtmosphereModel {
+            states: vec!["s0".to_string(), "s1".to_string()],
+            k_values: vec![0.0, 1.0],
+            transition_matrix: vec![
+                vec![1e-10, 1.0 - 1e-10], // Extremely small chance to stay
+                vec![0.0, 1.0],
+            ],
+            lcg: Lcg::new(42),
+        };
+
+        step_atmosphere(&mut gs, &mut model);
+        // 5.8e-11 < 1e-10, so it should stay in s0
+        assert_eq!(gs.atmos_state, 0);
+
+        // Second call
+        // Lcg next_f64 is approx 9.7e-5
+        model.transition_matrix[0] = vec![1e-5, 1.0 - 1e-5];
+        step_atmosphere(&mut gs, &mut model);
+        // 9.7e-5 > 1e-5, so it should transition to s1
+        assert_eq!(gs.atmos_state, 1);
+    }
+}
