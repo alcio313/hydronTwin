@@ -4472,3 +4472,38 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dot_standard() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, 5.0, 6.0];
+        // 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
+        assert_eq!(dot(a, b), 32.0);
+    }
+
+    #[test]
+    fn test_dot_zero() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [0.0, 0.0, 0.0];
+        assert_eq!(dot(a, b), 0.0);
+    }
+
+    #[test]
+    fn test_dot_orthogonal() {
+        let a = [1.0, 0.0, 0.0];
+        let b = [0.0, 1.0, 0.0];
+        assert_eq!(dot(a, b), 0.0);
+    }
+
+    #[test]
+    fn test_dot_negative() {
+        let a = [1.0, -2.0, 3.0];
+        let b = [-4.0, 5.0, -6.0];
+        // 1*-4 + -2*5 + 3*-6 = -4 - 10 - 18 = -32
+        assert_eq!(dot(a, b), -32.0);
+    }
+}
