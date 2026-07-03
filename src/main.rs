@@ -4472,3 +4472,117 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_env() -> SimEnvironment {
+        SimEnvironment {
+            mu: 3.986004418e14,
+            r_earth: 6378137.0,
+            j2: 1.08262668e-3,
+            rho0_500km: 3.8e-12,
+            h0_km: 500.0,
+            scale_height_km: 70.0,
+            p_srp: 4.56e-6,
+        }
+    }
+
+    #[test]
+    fn test_visible_sgl_vertical() {
+        let env = mock_env();
+        let r_gs = [env.r_earth, 0.0, 0.0];
+        let r_sat = [env.r_earth + 500_000.0, 0.0, 0.0];
+        assert!(visible_sgl(r_sat, r_gs, env.r_earth));
+    }
+
+    #[test]
+    fn test_visible_sgl_horizontal() {
+        let env = mock_env();
+        let r_gs = [env.r_earth, 0.0, 0.0];
+        // Satellite at horizon: [env.r_earth, 500000.0, 0.0]
+        let r_sat = [env.r_earth, 500_000.0, 0.0];
+        assert!(visible_sgl(r_sat, r_gs, env.r_earth));
+    }
+
+    #[test]
+    fn test_visible_sgl_blocked() {
+        let env = mock_env();
+        let r_gs = [env.r_earth, 0.0, 0.0];
+        let r_sat = [-env.r_earth - 500_000.0, 0.0, 0.0];
+        assert!(!visible_sgl(r_sat, r_gs, env.r_earth));
+    }
+
+    #[test]
+    fn test_compute_link_capacity_isl_nominal() {
+        let env = mock_env();
+        let r_from = [env.r_earth + 500_000.0, 0.0, 0.0];
+        let r_to = [env.r_earth + 500_000.0, 1000_000.0, 0.0];
+        // Distance is 1000 km
+        let ref_dist_km = 1000.0;
+        let nominal_capacity = 10.0;
+
+        let capacity = compute_link_capacity(
+            r_from, r_to, false, 0.0, ref_dist_km, nominal_capacity, &env
+        );
+        assert!((capacity - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_link_capacity_isl_double_dist() {
+        let env = mock_env();
+        let r_from = [env.r_earth + 500_000.0, 0.0, 0.0];
+        let r_to = [env.r_earth + 500_000.0, 2000_000.0, 0.0];
+        let ref_dist_km = 1000.0;
+        let nominal_capacity = 10.0;
+
+        let capacity = compute_link_capacity(
+            r_from, r_to, false, 0.0, ref_dist_km, nominal_capacity, &env
+        );
+        // (1000 / 2000)^2 * 10 = 0.25 * 10 = 2.5
+        assert!((capacity - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_link_capacity_isl_occluded() {
+        let env = mock_env();
+        let r_from = [env.r_earth + 500_000.0, 0.0, 0.0];
+        let r_to = [-(env.r_earth + 500_000.0), 0.0, 0.0];
+        let capacity = compute_link_capacity(
+            r_from, r_to, false, 0.0, 1000.0, 10.0, &env
+        );
+        assert_eq!(capacity, 0.0);
+    }
+
+    #[test]
+    fn test_compute_link_capacity_sgl_zenith() {
+        let env = mock_env();
+        let r_gs = [env.r_earth, 0.0, 0.0];
+        let r_sat = [env.r_earth + 500_000.0, 0.0, 0.0];
+        let gs_k = 0.05 / 1000.0; // 0.05 dB/km -> dB/m
+        let ref_dist_km = 500.0;
+        let nominal_capacity = 10.0;
+
+        // At zenith, l_slant = 10000 m
+        // att_db = 0.05/1000 * 10000 = 0.5
+        // t_atm = 10^(-0.5/10) = 10^(-0.05)
+        let capacity = compute_link_capacity(
+            r_sat, r_gs, true, gs_k, ref_dist_km, nominal_capacity, &env
+        );
+        let expected_t_atm = 10.0_f64.powf(-0.05);
+        let expected_capacity = 10.0 * expected_t_atm;
+        assert!((capacity - expected_capacity).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_link_capacity_sgl_blocked() {
+        let env = mock_env();
+        let r_gs = [env.r_earth, 0.0, 0.0];
+        let r_sat = [-env.r_earth - 500_000.0, 0.0, 0.0];
+        let capacity = compute_link_capacity(
+            r_sat, r_gs, true, 0.05/1000.0, 1000.0, 10.0, &env
+        );
+        assert_eq!(capacity, 0.0);
+    }
+}
