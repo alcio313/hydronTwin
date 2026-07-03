@@ -4472,3 +4472,47 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_standard() {
+        let v = [1.0, 0.0, 0.0];
+        let n = normalize(v);
+        assert_eq!(n, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_normalize_non_unit() {
+        let v = [3.0, 4.0, 0.0];
+        let n = normalize(v);
+        let expected = [0.6, 0.8, 0.0];
+        for i in 0..3 {
+            assert!((n[i] - expected[i]).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_normalize_zero() {
+        let v = [0.0, 0.0, 0.0];
+        let n = normalize(v);
+        assert_eq!(n, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_normalize_negative() {
+        let v = [-3.0, 0.0, 4.0];
+        let n = normalize(v);
+        let expected = [-0.6, 0.0, 0.8];
+        for i in 0..3 {
+            assert!((n[i] - expected[i]).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_norm() {
+        assert_eq!(norm([3.0, 4.0, 0.0]), 5.0);
+        assert_eq!(norm([0.0, 0.0, 0.0]), 0.0);
+    }
+}
