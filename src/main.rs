@@ -4472,3 +4472,68 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_approx_eq(a: f64, b: f64, epsilon: f64) {
+        assert!((a - b).abs() < epsilon, "assertion failed: ({} - {}).abs() < {}", a, b, epsilon);
+    }
+
+    #[test]
+    fn test_az_el_dist_overhead() {
+        let obs_lat = 0.0f64.to_radians();
+        let obs_lon = 0.0f64.to_radians();
+        let obs_r = [6378137.0, 0.0, 0.0];
+        let tgt_r = [6378137.0 + 1000000.0, 0.0, 0.0];
+
+        let (az, el, dist) = az_el_dist(obs_r, obs_lat, obs_lon, tgt_r);
+
+        assert_approx_eq(az, 0.0, 1e-9);
+        assert_approx_eq(el, 90.0, 1e-9);
+        assert_approx_eq(dist, 1000.0, 1e-9);
+    }
+
+    #[test]
+    fn test_az_el_dist_north() {
+        let obs_lat = 0.0f64.to_radians();
+        let obs_lon = 0.0f64.to_radians();
+        let obs_r = [6378137.0, 0.0, 0.0];
+        let tgt_r = [6378137.0, 0.0, 1000.0];
+
+        let (az, el, dist) = az_el_dist(obs_r, obs_lat, obs_lon, tgt_r);
+
+        assert_approx_eq(az, 0.0, 1e-9);
+        assert_approx_eq(el, 0.0, 1e-9);
+        assert_approx_eq(dist, 1.0, 1e-9);
+    }
+
+    #[test]
+    fn test_az_el_dist_east() {
+        let obs_lat = 0.0f64.to_radians();
+        let obs_lon = 0.0f64.to_radians();
+        let obs_r = [6378137.0, 0.0, 0.0];
+        let tgt_r = [6378137.0, 1000.0, 0.0];
+
+        let (az, el, dist) = az_el_dist(obs_r, obs_lat, obs_lon, tgt_r);
+
+        assert_approx_eq(az, 90.0, 1e-9);
+        assert_approx_eq(el, 0.0, 1e-9);
+        assert_approx_eq(dist, 1.0, 1e-9);
+    }
+
+    #[test]
+    fn test_az_el_dist_too_close() {
+        let obs_lat = 0.0;
+        let obs_lon = 0.0;
+        let obs_r = [6378137.0, 0.0, 0.0];
+        let tgt_r = [6378137.0 + 0.5, 0.0, 0.0];
+
+        let (az, el, dist) = az_el_dist(obs_r, obs_lat, obs_lon, tgt_r);
+
+        assert_eq!(az, 0.0);
+        assert_eq!(el, 0.0);
+        assert_eq!(dist, 0.0);
+    }
+}
