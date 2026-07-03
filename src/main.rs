@@ -4472,3 +4472,41 @@ extern "C" {
     pub fn download_file(filename: &str, text: &str);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_q_standard() {
+        let q = [2.0, 0.0, 0.0, 0.0];
+        let normalized = normalize_q(q);
+        assert_eq!(normalized, [1.0, 0.0, 0.0, 0.0]);
+
+        let q2 = [1.0, 1.0, 1.0, 1.0];
+        let normalized2 = normalize_q(q2);
+        let expected = 0.5; // 1.0 / sqrt(1^2 + 1^2 + 1^2 + 1^2) = 1/2
+        assert_eq!(normalized2, [expected, expected, expected, expected]);
+    }
+
+    #[test]
+    fn test_normalize_q_zero() {
+        let q = [0.0, 0.0, 0.0, 0.0];
+        let normalized = normalize_q(q);
+        assert_eq!(normalized, [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_normalize_q_already_normalized() {
+        let q = [1.0, 0.0, 0.0, 0.0];
+        let normalized = normalize_q(q);
+        assert_eq!(normalized, [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_normalize_q_negative() {
+        let q = [-2.0, 0.0, 0.0, 0.0];
+        let normalized = normalize_q(q);
+        assert_eq!(normalized, [-1.0, 0.0, 0.0, 0.0]);
+    }
+}
