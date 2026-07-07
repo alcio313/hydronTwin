@@ -28,7 +28,7 @@ impl Lcg {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrbitType {
     LEO,
     MEO,
@@ -1265,6 +1265,22 @@ impl HydronGuiApp {
         None
     }
 
+    fn get_satellite_by_index(&self, flattened_idx: usize) -> &Satellite {
+        let mut count = 0;
+        for seg in &self.constellation.segments {
+            let next_count = count + seg.satellites.len();
+            if flattened_idx < next_count {
+                return &seg.satellites[flattened_idx - count];
+            }
+            count = next_count;
+        }
+        panic!("Satellite index out of bounds: {}", flattened_idx);
+    }
+
+    fn get_satellite_id_by_index(&self, flattened_idx: usize) -> &String {
+        &self.get_satellite_by_index(flattened_idx).id
+    }
+
     fn run_and_export_24h(&self) -> Result<String, std::io::Error> {
         use std::io::Write;
 
@@ -1326,8 +1342,8 @@ impl HydronGuiApp {
                 [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
             ];
 
-            let all_sats: Vec<(String, OrbitType, [f64; 3])> = constellation.segments.iter()
-                .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
+            let all_sats: Vec<(OrbitType, [f64; 3])> = constellation.segments.iter()
+                .flat_map(|seg| seg.satellites.iter().map(|s| (s.orbit_type, s.r)))
                 .collect();
 
             let gs_eci_list: Vec<[f64; 3]> = ground_stations.iter().map(|gs| {
@@ -1348,7 +1364,7 @@ impl HydronGuiApp {
             let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
 
             // SGL links capacity
-            for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
+            for (sat_idx, (orbit_type, sat_r)) in all_sats.iter().enumerate() {
                 let sat_max = match orbit_type {
                     OrbitType::LEO => self.leo_max_bitrate,
                     OrbitType::MEO => self.meo_max_bitrate,
@@ -1375,7 +1391,7 @@ impl HydronGuiApp {
                 }
 
                 if best_idx < ground_stations.len() && best_cap > 0.0 {
-                    if orbit_type == &OrbitType::LEO {
+                    if *orbit_type == OrbitType::LEO {
                         leo_best_gs[sat_idx] = best_idx;
                         leo_best_gs_cap[sat_idx] = best_cap;
                     } else {
@@ -1383,8 +1399,8 @@ impl HydronGuiApp {
                         gs_throughputs[best_idx] += best_cap;
                         total_throughput += best_cap;
                         active_sgl_links += 1;
-                        sat_has_sgl.insert(sat_id.clone());
-                        sat_sgl_link.insert(sat_id.clone(), best_cap);
+                        sat_has_sgl.insert(sat_idx);
+                        sat_sgl_link.insert(sat_idx, best_cap);
                     }
                 }
             }
@@ -1395,21 +1411,21 @@ impl HydronGuiApp {
             let mut candidate_isls = Vec::new();
             for i in 0..all_sats.len() {
                 for j in (i + 1)..all_sats.len() {
-                    let (id1, type1, r1) = &all_sats[i];
-                    let (id2, type2, r2) = &all_sats[j];
+                    let (type1, r1) = all_sats[i];
+                    let (type2, r2) = all_sats[j];
 
-                    let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
-                    let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
+                    let id1_has_sgl = sat_has_sgl.contains(&i) || (type1 == OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
+                    let id2_has_sgl = sat_has_sgl.contains(&j) || (type2 == OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
                     let mut is_allowed = id1_has_sgl || id2_has_sgl;
-                    if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
+                    if type1 == OrbitType::GEO && !sat_has_sgl.contains(&i) {
                         is_allowed = false;
                     }
-                    if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
+                    if type2 == OrbitType::GEO && !sat_has_sgl.contains(&j) {
                         is_allowed = false;
                     }
 
-                    if is_allowed && visible(*r1, *r2, self.config.env.r_earth) {
-                        let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
+                    if is_allowed && visible(r1, r2, self.config.env.r_earth) {
+                        let is_leo = type1 == OrbitType::LEO || type2 == OrbitType::LEO;
                         let capacity = if is_leo {
                             self.leo_max_bitrate
                         } else {
@@ -1429,11 +1445,11 @@ impl HydronGuiApp {
                                 OrbitType::MEO => self.config.meo_alt_km,
                                 OrbitType::GEO => self.config.geo_alt_km,
                             };
-                            compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
+                            compute_link_capacity(r1, r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
                         };
                         let mut capacity = capacity;
-                        let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).copied().unwrap_or(0.0) };
-                        let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).copied().unwrap_or(0.0) };
+                        let cap1 = if type1 == OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(&i).copied().unwrap_or(0.0) };
+                        let cap2 = if type2 == OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(&j).copied().unwrap_or(0.0) };
 
                         if id1_has_sgl && id2_has_sgl {
                             capacity = capacity.min(cap1.max(cap2));
@@ -1457,8 +1473,8 @@ impl HydronGuiApp {
             // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
             if !self.prioritize_relay {
                 for i in 0..all_sats.len() {
-                    let (_, type_i, _) = &all_sats[i];
-                    if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
+                    let (type_i, _) = all_sats[i];
+                    if type_i == OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
                         candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
                     }
                 }
@@ -1473,35 +1489,35 @@ impl HydronGuiApp {
 
             let mut leo_isl_count = std::collections::HashMap::new();
             for (_class, capacity, i, j) in candidate_isls {
-                let (id1, type1, _) = &all_sats[i];
+                let (type1, _) = all_sats[i];
 
                 if j == usize::MAX {
-                    if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    if *leo_isl_count.entry(i).or_insert(0) >= 1 {
                         continue;
                     }
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                    *leo_isl_count.entry(i).or_insert(0) += 1;
 
                     let gs_idx = leo_best_gs[i];
                     gs_throughputs[gs_idx] += capacity;
                     total_throughput += capacity;
                     active_sgl_links += 1;
-                    sat_has_sgl.insert(id1.clone());
-                    sat_sgl_link.insert(id1.clone(), capacity);
+                    sat_has_sgl.insert(i);
+                    sat_sgl_link.insert(i, capacity);
                 } else {
-                    let (id2, type2, _) = &all_sats[j];
+                    let (type2, _) = all_sats[j];
 
-                    if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    if type1 == OrbitType::LEO && *leo_isl_count.entry(i).or_insert(0) >= 1 {
                         continue;
                     }
-                    if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                    if type2 == OrbitType::LEO && *leo_isl_count.entry(j).or_insert(0) >= 1 {
                         continue;
                     }
 
-                    if type1 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                    if type1 == OrbitType::LEO {
+                        *leo_isl_count.entry(i).or_insert(0) += 1;
                     }
-                    if type2 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                    if type2 == OrbitType::LEO {
+                        *leo_isl_count.entry(j).or_insert(0) += 1;
                     }
 
                     active_isl_links += 1;
@@ -1980,8 +1996,8 @@ impl eframe::App for HydronGuiApp {
         ];
 
         // Gather all active satellite ECI positions
-        let all_sats: Vec<(String, OrbitType, [f64; 3])> = self.constellation.segments.iter()
-            .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
+        let all_sats: Vec<(OrbitType, [f64; 3])> = self.constellation.segments.iter()
+            .flat_map(|seg| seg.satellites.iter().map(|s| (s.orbit_type, s.r)))
             .collect();
 
         // Gather all GS ECI positions
@@ -1991,7 +2007,8 @@ impl eframe::App for HydronGuiApp {
         }).collect();
 
         // Pre-calculate connected satellites for each GS and throughputs
-        let mut connected_sats_per_gs = vec![Vec::new(); self.ground_stations.len()];
+        // index into all_sats, label, current_cap, max_cap
+        let mut connected_sats_per_gs: Vec<Vec<(usize, &str, f64, f64)>> = vec![Vec::new(); self.ground_stations.len()];
         let mut gs_throughputs = vec![0.0f32; self.ground_stations.len()];
         let mut total_throughput = 0.0f32;
 
@@ -1999,7 +2016,7 @@ impl eframe::App for HydronGuiApp {
         let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
         let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
 
-        for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
+        for (sat_idx, (orbit_type, sat_r)) in all_sats.iter().enumerate() {
             let sat_max = match orbit_type {
                 OrbitType::LEO => self.leo_max_bitrate,
                 OrbitType::MEO => self.meo_max_bitrate,
@@ -2031,11 +2048,11 @@ impl eframe::App for HydronGuiApp {
             }
 
             if best_idx < self.ground_stations.len() && best_cap > 0.0 {
-                if orbit_type == &OrbitType::LEO {
+                if *orbit_type == OrbitType::LEO {
                     leo_best_gs[sat_idx] = best_idx;
                     leo_best_gs_cap[sat_idx] = best_cap;
                 } else {
-                    connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_label, best_cap, sat_max));
+                    connected_sats_per_gs[best_idx].push((sat_idx, orbit_label, best_cap, sat_max));
                     gs_throughputs[best_idx] += best_cap as f32;
                     total_throughput += best_cap as f32;
                 }
@@ -2043,12 +2060,13 @@ impl eframe::App for HydronGuiApp {
         }
 
         let mut sat_has_sgl = std::collections::HashSet::new();
+        // Maps satellite index to (GS name, capacity)
         let mut sat_sgl_link = std::collections::HashMap::new();
         for (gs_idx, gs_conn) in connected_sats_per_gs.iter().enumerate() {
-            let gs_name = &self.ground_stations[gs_idx].name;
-            for (sat_id, _, cap, _) in gs_conn {
-                sat_has_sgl.insert(sat_id.clone());
-                sat_sgl_link.insert(sat_id.clone(), (gs_name.clone(), *cap));
+            let gs_name = self.ground_stations[gs_idx].name.clone();
+            for (sat_idx, _, cap, _) in gs_conn {
+                sat_has_sgl.insert(*sat_idx);
+                sat_sgl_link.insert(*sat_idx, (gs_name.clone(), *cap));
             }
         }
 
@@ -2056,16 +2074,16 @@ impl eframe::App for HydronGuiApp {
         let mut candidate_isls = Vec::new();
         for i in 0..all_sats.len() {
             for j in (i + 1)..all_sats.len() {
-                let (id1, type1, r1) = &all_sats[i];
-                let (id2, type2, r2) = &all_sats[j];
+                let (type1, r1) = all_sats[i];
+                let (type2, r2) = all_sats[j];
 
-                let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
-                let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
+                let id1_has_sgl = sat_has_sgl.contains(&i) || (type1 == OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
+                let id2_has_sgl = sat_has_sgl.contains(&j) || (type2 == OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
                 let mut is_allowed = id1_has_sgl || id2_has_sgl;
-                if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
+                if type1 == OrbitType::GEO && !sat_has_sgl.contains(&i) {
                     is_allowed = false;
                 }
-                if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
+                if type2 == OrbitType::GEO && !sat_has_sgl.contains(&j) {
                     is_allowed = false;
                 }
 
@@ -2076,8 +2094,8 @@ impl eframe::App for HydronGuiApp {
                     _ => self.show_meo || self.show_geo || self.show_leo,
                 } && is_allowed;
 
-                if show_link && visible(*r1, *r2, self.config.env.r_earth) {
-                    let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
+                if show_link && visible(r1, r2, self.config.env.r_earth) {
+                    let is_leo = type1 == OrbitType::LEO || type2 == OrbitType::LEO;
                     let capacity = if is_leo {
                         self.leo_max_bitrate
                     } else {
@@ -2097,11 +2115,11 @@ impl eframe::App for HydronGuiApp {
                             OrbitType::MEO => self.config.meo_alt_km,
                             OrbitType::GEO => self.config.geo_alt_km,
                         };
-                        compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
+                        compute_link_capacity(r1, r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
                     };
                     let mut capacity = capacity;
-                    let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).map(|x| x.1).unwrap_or(0.0) };
-                    let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).map(|x| x.1).unwrap_or(0.0) };
+                    let cap1 = if type1 == OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(&i).map(|x| x.1).unwrap_or(0.0) };
+                    let cap2 = if type2 == OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(&j).map(|x| x.1).unwrap_or(0.0) };
 
                     if id1_has_sgl && id2_has_sgl {
                         capacity = capacity.min(cap1.max(cap2));
@@ -2125,8 +2143,8 @@ impl eframe::App for HydronGuiApp {
         // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
         if !self.prioritize_relay {
             for i in 0..all_sats.len() {
-                let (_, type_i, _) = &all_sats[i];
-                if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
+                let (type_i, _) = all_sats[i];
+                if type_i == OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
                     candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
                 }
             }
@@ -2144,41 +2162,41 @@ impl eframe::App for HydronGuiApp {
         let mut sat_isl_link = std::collections::HashMap::new();
 
         for (_class, capacity, i, j) in candidate_isls {
-            let (id1, type1, _) = &all_sats[i];
+            let (type1, _) = &all_sats[i];
 
             if j == usize::MAX {
-                if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                if *leo_isl_count.entry(i).or_insert(0) >= 1 {
                     continue;
                 }
-                *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                *leo_isl_count.entry(i).or_insert(0) += 1;
 
                 let gs_idx = leo_best_gs[i];
-                let gs_name = &self.ground_stations[gs_idx].name;
-                connected_sats_per_gs[gs_idx].push((id1.clone(), "LEO", capacity, self.leo_max_bitrate));
+                let gs_name = self.ground_stations[gs_idx].name.clone();
+                connected_sats_per_gs[gs_idx].push((i, "LEO", capacity, self.leo_max_bitrate));
                 gs_throughputs[gs_idx] += capacity as f32;
                 total_throughput += capacity as f32;
-                sat_has_sgl.insert(id1.clone());
-                sat_sgl_link.insert(id1.clone(), (gs_name.clone(), capacity));
+                sat_has_sgl.insert(i);
+                sat_sgl_link.insert(i, (gs_name, capacity));
             } else {
-                let (id2, type2, _) = &all_sats[j];
+                let (type2, _) = &all_sats[j];
 
-                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                if *type1 == OrbitType::LEO && *leo_isl_count.entry(i).or_insert(0) >= 1 {
                     continue;
                 }
-                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                if *type2 == OrbitType::LEO && *leo_isl_count.entry(j).or_insert(0) >= 1 {
                     continue;
                 }
 
-                if type1 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
+                if *type1 == OrbitType::LEO {
+                    *leo_isl_count.entry(i).or_insert(0) += 1;
                 }
-                if type2 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
+                if *type2 == OrbitType::LEO {
+                    *leo_isl_count.entry(j).or_insert(0) += 1;
                 }
 
                 active_isls.push((i, j, capacity));
-                sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
-                sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
+                sat_isl_link.insert(i, (j, capacity));
+                sat_isl_link.insert(j, (i, capacity));
             }
         }
 
@@ -3125,26 +3143,27 @@ impl eframe::App for HydronGuiApp {
                         if let Some(sat) = self.find_satellite(sat_id) {
                             let sat_r_eci = sat.r;
                             // SGL link → connected ground station
-                            if let Some((gs_name, _cap)) = sat_sgl_link.get(sat_id) {
-                                if let Some(gs) = self.ground_stations.iter().find(|g| &g.name == gs_name) {
-                                    let gs_ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-                                    let gst = self.current_time * 7.292115e-5;
-                                    let rot = eci_to_ecef_matrix(gst);
-                                    let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
-                                    let gs_eci = mat_vec_mult(rot_t, gs_ecef);
-                                    let (az, el, dist) = az_el_dist(gs_eci, gs.lat_rad, gs.lon_rad + gst, sat_r_eci);
-                                    ui.small(format!("📡 GS {} → sat", gs_name));
-                                    ui.small(format!("  Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
+                            if let Some(sat_idx) = self.constellation.segments.iter().flat_map(|seg| &seg.satellites).position(|s| &s.id == sat_id) {
+                                if let Some((gs_name, _cap)) = sat_sgl_link.get(&sat_idx) {
+                                    if let Some(gs) = self.ground_stations.iter().find(|g| g.name == **gs_name) {
+                                        let gs_ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                                        let gst = self.current_time * 7.292115e-5;
+                                        let rot = eci_to_ecef_matrix(gst);
+                                        let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
+                                        let gs_eci = mat_vec_mult(rot_t, gs_ecef);
+                                        let (az, el, dist) = az_el_dist(gs_eci, gs.lat_rad, gs.lon_rad + gst, sat_r_eci);
+                                        ui.small(format!("📡 GS {} → sat", gs_name));
+                                        ui.small(format!("  Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
+                                    }
                                 }
-                            }
-                            // ISL link → partner satellite
-                            if let Some((partner_id, _cap)) = sat_isl_link.get(sat_id) {
-                                if let Some(partner) = self.find_satellite(partner_id) {
+                                // ISL link → partner satellite
+                                if let Some((partner_idx, _cap)) = sat_isl_link.get(&sat_idx) {
+                                    let partner = self.get_satellite_by_index(*partner_idx);
                                     let r_len = norm(sat_r_eci);
                                     let sat_lat = if r_len > 0.0 { (sat_r_eci[2] / r_len).asin() } else { 0.0 };
                                     let sat_lon = sat_r_eci[1].atan2(sat_r_eci[0]);
                                     let (az, el, dist) = az_el_dist(sat_r_eci, sat_lat, sat_lon, partner.r);
-                                    ui.small(format!("🛰 ISL → {}", partner_id));
+                                    ui.small(format!("🛰 ISL → {}", partner.id));
                                     ui.small(format!("  Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
                                 }
                             }
@@ -3191,19 +3210,18 @@ impl eframe::App for HydronGuiApp {
                                 });
                                 if !connected.is_empty() {
                                     ui.separator();
-                                    for (sat_id, _, speed, _) in connected {
+                                    for (sat_idx, _, speed, _) in connected {
+                                        let sat = self.get_satellite_by_index(*sat_idx);
                                         // Compute Az/El/Dist of this satellite as seen from the GS
-                                        if let Some(sat) = self.find_satellite(sat_id) {
+                                        {
                                             let gst = self.current_time * 7.292115e-5;
                                             let rot = eci_to_ecef_matrix(gst);
                                             let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
                                             let gs_ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
                                             let gs_eci_pos = mat_vec_mult(rot_t, gs_ecef);
                                             let (az, el, dist) = az_el_dist(gs_eci_pos, gs.lat_rad, gs.lon_rad + gst, sat.r);
-                                            ui.small(format!("  • {} {:.1} Gbps", sat_id, speed));
+                                            ui.small(format!("  • {} {:.1} Gbps", sat.id, speed));
                                             ui.small(format!("    Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
-                                        } else {
-                                            ui.small(format!("  • {}: {:.1} Gbps", sat_id, speed));
                                         }
                                     }
                                 }
@@ -3221,17 +3239,16 @@ impl eframe::App for HydronGuiApp {
                     egui::ScrollArea::vertical().id_source("hud_bitrates_scroll").show(ui, |ui| {
                         ui.label(egui::RichText::new("SATELLITES").strong().color(egui::Color32::LIGHT_BLUE));
                         
-                        let mut all_sats = Vec::new();
-                        for seg in &self.constellation.segments {
-                            for sat in &seg.satellites {
-                                all_sats.push(sat.id.clone());
-                            }
-                        }
-                        all_sats.sort();
+                        let mut all_sats_full: Vec<(String, usize)> = self.constellation.segments.iter()
+                            .flat_map(|seg| seg.satellites.iter())
+                            .enumerate()
+                            .map(|(idx, s)| (s.id.clone(), idx))
+                            .collect();
+                        all_sats_full.sort_by(|a, b| a.0.cmp(&b.0));
 
-                        for sat_id in all_sats {
-                            let sgl_info = sat_sgl_link.get(&sat_id);
-                            let _isl_info = sat_isl_link.get(&sat_id);
+                        for (sat_id, sat_idx) in all_sats_full {
+                            let sgl_info = sat_sgl_link.get(&sat_idx);
+                            let _isl_info = sat_isl_link.get(&sat_idx);
                             let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + _isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
                             
                             let color = if total_speed > 50.0 {
@@ -3245,7 +3262,7 @@ impl eframe::App for HydronGuiApp {
                             ui.horizontal(|ui| {
                                 let is_selected = sat_id == self.selected_satellite_id;
                                 if ui.selectable_label(is_selected, &sat_id).clicked() {
-                                    self.selected_satellite_id = sat_id.clone();
+                                    self.selected_satellite_id = sat_id;
                                     self.update_input_fields_for_selected();
                                 }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3485,17 +3502,16 @@ impl eframe::App for HydronGuiApp {
                                         
                                         ui.label(egui::RichText::new("📶 Bitrates Canali").strong().color(egui::Color32::LIGHT_BLUE));
                                         
-                                        let mut all_sats = Vec::new();
-                                        for seg in &self.constellation.segments {
-                                            for sat in &seg.satellites {
-                                                all_sats.push(sat.id.clone());
-                                            }
-                                        }
-                                        all_sats.sort();
+                                        let mut all_sats_full: Vec<(String, usize)> = self.constellation.segments.iter()
+                                            .flat_map(|seg| seg.satellites.iter())
+                                            .enumerate()
+                                            .map(|(idx, s)| (s.id.clone(), idx))
+                                            .collect();
+                                        all_sats_full.sort_by(|a, b| a.0.cmp(&b.0));
 
-                                        for sat_id in all_sats {
-                                            let sgl_info = sat_sgl_link.get(&sat_id);
-                                            let _isl_info = sat_isl_link.get(&sat_id);
+                                        for (sat_id, sat_idx) in all_sats_full {
+                                            let sgl_info = sat_sgl_link.get(&sat_idx);
+                                            let _isl_info = sat_isl_link.get(&sat_idx);
                                             let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + _isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
                                             
                                             let color = if total_speed > 50.0 {
@@ -3509,7 +3525,7 @@ impl eframe::App for HydronGuiApp {
                                             ui.horizontal(|ui| {
                                                 let is_selected = sat_id == self.selected_satellite_id;
                                                 if ui.selectable_label(is_selected, &sat_id).clicked() {
-                                                    self.selected_satellite_id = sat_id.clone();
+                                                    self.selected_satellite_id = sat_id;
                                                     self.update_input_fields_for_selected();
                                                 }
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3978,8 +3994,8 @@ impl eframe::App for HydronGuiApp {
                 if i >= all_sats.len() || j >= all_sats.len() {
                     continue;
                 }
-                let (id1, _, _) = &all_sats[i];
-                let (id2, _, _) = &all_sats[j];
+                let id1 = self.get_satellite_id_by_index(i);
+                let id2 = self.get_satellite_id_by_index(j);
 
                 let pos1 = satellites_screen.iter().find(|(id, _, _, _, _, _, _)| id == id1);
                 let pos2 = satellites_screen.iter().find(|(id, _, _, _, _, _, _)| id == id2);
