@@ -2314,6 +2314,16 @@ impl eframe::App for HydronGuiApp {
                 }
             }
 
+            // Pinch-to-zoom: two-finger pinch on touchscreens (and trackpads). zoom_delta()
+            // is the multiplicative gesture factor (1.0 = no change). Gated on contains_pointer
+            // rather than hovered() because touch input doesn't set the hover state.
+            if response.contains_pointer() {
+                let pinch = ui.input(|i| i.zoom_delta());
+                if (pinch - 1.0).abs() > f32::EPSILON {
+                    self.map_zoom = (self.map_zoom * pinch).clamp(0.1, 10.0);
+                }
+            }
+
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(4, 5, 12));
 
