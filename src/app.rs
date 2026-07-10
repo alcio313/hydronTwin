@@ -1314,13 +1314,6 @@ impl eframe::App for HydronGuiApp {
                                     ui.add(egui::Slider::new(&mut self.time_warp, -50..=50).text("x"));
                                     ui.separator();
                                     ui.label(format!("Epoch: {:.1}s", self.current_time));
-                                    ui.separator();
-                                    // Real-time render rate. stable_dt is egui's smoothed frame
-                                    // time; the warp advances |time_warp| sim-seconds per frame,
-                                    // so the effective speed is time_warp * fps sim-seconds/second.
-                                    let dt = ui.ctx().input(|i| i.stable_dt);
-                                    let fps = if dt > 0.0 { 1.0 / dt } else { 0.0 };
-                                    ui.label(format!("{:.0} FPS", fps));
                                 });
                             });
                         });
@@ -1394,7 +1387,7 @@ impl eframe::App for HydronGuiApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("LEO SEGMENT").strong().color(egui::Color32::LIGHT_BLUE));
-                                ui.add(egui::Slider::new(&mut self.leo_num_input, 0..=20).text("Sats"));
+                                ui.add(egui::Slider::new(&mut self.leo_num_input, 0..=64).text("Sats"));
                                 ui.add(egui::Slider::new(&mut self.leo_alt_input, 200.0..=1200.0).text("Alt (km)"));
                                 ui.add(egui::Slider::new(&mut self.leo_inc_input, 0.0..=180.0).text("Inc (°)"));
                             });
@@ -1403,7 +1396,7 @@ impl eframe::App for HydronGuiApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("MEO SEGMENT").strong().color(egui::Color32::LIGHT_BLUE));
-                                ui.add(egui::Slider::new(&mut self.meo_num_input, 0..=8).text("Sats"));
+                                ui.add(egui::Slider::new(&mut self.meo_num_input, 0..=32).text("Sats"));
                                 ui.add(egui::Slider::new(&mut self.meo_alt_input, 5000.0..=15000.0).text("Alt (km)"));
                                 ui.add(egui::Slider::new(&mut self.meo_inc_input, 0.0..=180.0).text("Inc (°)"));
                             });
@@ -1412,7 +1405,7 @@ impl eframe::App for HydronGuiApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("GEO SEGMENT").strong().color(egui::Color32::LIGHT_BLUE));
-                                ui.add(egui::Slider::new(&mut self.geo_num_input, 0..=6).text("Sats"));
+                                ui.add(egui::Slider::new(&mut self.geo_num_input, 0..=16).text("Sats"));
                                 ui.add(egui::Slider::new(&mut self.geo_alt_input, 30000.0..=40000.0).text("Alt (km)"));
                                 ui.add(egui::Slider::new(&mut self.geo_inc_input, 0.0..=90.0).text("Inc (°)"));
                             });
@@ -1718,7 +1711,7 @@ impl eframe::App for HydronGuiApp {
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().slider_width = 70.0;
                                             ui.horizontal(|ui| {
-                                                ui.add(egui::DragValue::new(&mut self.add_const_num_sats).speed(1.0).clamp_range(1..=30));
+                                                ui.add(egui::DragValue::new(&mut self.add_const_num_sats).speed(1.0).clamp_range(1..=128));
                                                 ui.label("Sats");
                                             });
                                             ui.add(egui::Slider::new(&mut self.add_const_alt_km, alt_min..=alt_max).text("Alt"));
