@@ -373,15 +373,12 @@ impl HydronGuiApp {
             let mut active_sgl_links = 0;
             let mut active_isl_links = 0;
 
-            let mut sat_has_sgl = std::collections::HashSet::new();
-            let mut sat_sgl_link = std::collections::HashMap::new();
-
             // Track best SGL for LEO satellites
             let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
             let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
 
             // SGL links capacity
-            for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
+            for (sat_idx, (_sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
                 let sat_max = match orbit_type {
                     OrbitType::LEO => self.leo_max_bitrate,
                     OrbitType::MEO => self.meo_max_bitrate,
@@ -416,8 +413,6 @@ impl HydronGuiApp {
                         gs_throughputs[best_idx] += best_cap;
                         total_throughput += best_cap;
                         active_sgl_links += 1;
-                        sat_has_sgl.insert(sat_id.clone());
-                        sat_sgl_link.insert(sat_id.clone(), best_cap);
                     }
                 }
             }
@@ -425,21 +420,20 @@ impl HydronGuiApp {
             // ISL links
             // ponytail: greedy satellite link allocation. Limits LEO satellites to 1 connection.
             // O(N^2 log N) sort of candidates, which is fine for small constellations (<100 satellites).
+            // Widest-path reach to ground, allowing multi-hop relaying through MEO/GEO relays.
+            let cap_to_ground = self.ground_reach(&all_sats, &gs_eci_list, &ground_stations);
+
             let mut candidate_isls = Vec::new();
             for i in 0..all_sats.len() {
                 for j in (i + 1)..all_sats.len() {
-                    let (id1, type1, r1) = &all_sats[i];
-                    let (id2, type2, r2) = &all_sats[j];
+                    let (_id1, type1, r1) = &all_sats[i];
+                    let (_id2, type2, r2) = &all_sats[j];
 
-                    let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
-                    let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
-                    let mut is_allowed = id1_has_sgl || id2_has_sgl;
-                    if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
-                        is_allowed = false;
-                    }
-                    if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
-                        is_allowed = false;
-                    }
+                    // An endpoint may carry traffic if it can reach the ground directly or by
+                    // relaying through a chain of relays (encoded by cap_to_ground).
+                    let id1_has_sgl = cap_to_ground[i] > 0.0;
+                    let id2_has_sgl = cap_to_ground[j] > 0.0;
+                    let is_allowed = id1_has_sgl || id2_has_sgl;
 
                     if is_allowed && visible(*r1, *r2, self.config.env.r_earth) {
                         let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
@@ -465,8 +459,10 @@ impl HydronGuiApp {
                             compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
                         };
                         let mut capacity = capacity;
-                        let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).copied().unwrap_or(0.0) };
-                        let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).copied().unwrap_or(0.0) };
+                        // Bound by the downstream reach-to-ground so the relay chain bottleneck
+                        // (and the relay's own max capacity) limits the LEO's usable bitrate.
+                        let cap1 = cap_to_ground[i];
+                        let cap2 = cap_to_ground[j];
 
                         if id1_has_sgl && id2_has_sgl {
                             capacity = capacity.min(cap1.max(cap2));
@@ -518,8 +514,6 @@ impl HydronGuiApp {
                     gs_throughputs[gs_idx] += capacity;
                     total_throughput += capacity;
                     active_sgl_links += 1;
-                    sat_has_sgl.insert(id1.clone());
-                    sat_sgl_link.insert(id1.clone(), capacity);
                 } else {
                     let (id2, type2, _) = &all_sats[j];
 
@@ -553,6 +547,30 @@ impl HydronGuiApp {
         }
 
         Ok(filename.to_string())
+    }
+
+    /// Widest-path ground-reach routing for the current satellite/ground geometry.
+    /// Relays (MEO/GEO) forward traffic for satellites that have no direct ground link, so a
+    /// LEO's reachable bitrate is bounded by the bottleneck of the relay chain to the ground.
+    fn ground_reach(
+        &self,
+        all_sats: &[(String, OrbitType, [f64; 3])],
+        gs_eci: &[[f64; 3]],
+        stations: &[GroundStation],
+    ) -> Vec<f64> {
+        let nodes: Vec<RouteNode> = all_sats
+            .iter()
+            .map(|(_, orbit_type, r)| {
+                let (max_cap, sgl_ref_dist, isl_ref_dist, is_relay) = match orbit_type {
+                    OrbitType::LEO => (self.leo_max_bitrate, self.config.ref_dist_sgl_km, self.config.ref_dist_isl_km, false),
+                    OrbitType::MEO => (self.meo_max_bitrate, self.config.meo_alt_km, self.config.meo_alt_km, true),
+                    OrbitType::GEO => (self.geo_max_bitrate, self.config.geo_alt_km, self.config.geo_alt_km, true),
+                };
+                RouteNode { is_relay, max_cap, sgl_ref_dist, isl_ref_dist, r: *r }
+            })
+            .collect();
+        let gs_k: Vec<f64> = stations.iter().map(|g| g.k_value).collect();
+        compute_ground_reach(&nodes, gs_eci, &gs_k, &self.config.env)
     }
 
     fn drag_satellite_to(&mut self, sat_id: &str, mouse_pos: egui::Pos2, center: egui::Pos2, scale_factor: f64) {
@@ -1072,32 +1090,31 @@ impl eframe::App for HydronGuiApp {
             }
         }
 
-        let mut sat_has_sgl = std::collections::HashSet::new();
         let mut sat_sgl_link = std::collections::HashMap::new();
         for (gs_idx, gs_conn) in connected_sats_per_gs.iter().enumerate() {
             let gs_name = &self.ground_stations[gs_idx].name;
             for (sat_id, _, cap, _) in gs_conn {
-                sat_has_sgl.insert(sat_id.clone());
                 sat_sgl_link.insert(sat_id.clone(), (gs_name.clone(), *cap));
             }
         }
+
+        // Widest-path reach to ground, allowing multi-hop relaying through MEO/GEO relays:
+        // a relay with no direct ground link can still reach the ground through another relay.
+        // cap_to_ground[k] is the resulting bottleneck bitrate satellite k can push to ground.
+        let cap_to_ground = self.ground_reach(&all_sats, &gs_eci_list, &self.ground_stations);
 
         // Pre-calculate active ISL links
         let mut candidate_isls = Vec::new();
         for i in 0..all_sats.len() {
             for j in (i + 1)..all_sats.len() {
-                let (id1, type1, r1) = &all_sats[i];
-                let (id2, type2, r2) = &all_sats[j];
+                let (_id1, type1, r1) = &all_sats[i];
+                let (_id2, type2, r2) = &all_sats[j];
 
-                let id1_has_sgl = sat_has_sgl.contains(id1) || (type1 == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0);
-                let id2_has_sgl = sat_has_sgl.contains(id2) || (type2 == &OrbitType::LEO && leo_best_gs_cap[j] > 0.0);
-                let mut is_allowed = id1_has_sgl || id2_has_sgl;
-                if type1 == &OrbitType::GEO && !sat_has_sgl.contains(id1) {
-                    is_allowed = false;
-                }
-                if type2 == &OrbitType::GEO && !sat_has_sgl.contains(id2) {
-                    is_allowed = false;
-                }
+                // An endpoint may carry traffic if it can reach the ground — directly or by
+                // relaying through a chain of relays (that is what cap_to_ground encodes).
+                let id1_has_sgl = cap_to_ground[i] > 0.0;
+                let id2_has_sgl = cap_to_ground[j] > 0.0;
+                let is_allowed = id1_has_sgl || id2_has_sgl;
 
                 let show_link = match (type1, type2) {
                     (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
@@ -1130,8 +1147,11 @@ impl eframe::App for HydronGuiApp {
                         compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
                     };
                     let mut capacity = capacity;
-                    let cap1 = if type1 == &OrbitType::LEO { leo_best_gs_cap[i] } else { sat_sgl_link.get(id1).map(|x| x.1).unwrap_or(0.0) };
-                    let cap2 = if type2 == &OrbitType::LEO { leo_best_gs_cap[j] } else { sat_sgl_link.get(id2).map(|x| x.1).unwrap_or(0.0) };
+                    // Bound the link by the downstream reach-to-ground of whichever endpoint
+                    // carries the traffic onward, so the relay chain's bottleneck (and the
+                    // relay's own max capacity) limits the bitrate available to LEO terminals.
+                    let cap1 = cap_to_ground[i];
+                    let cap2 = cap_to_ground[j];
 
                     if id1_has_sgl && id2_has_sgl {
                         capacity = capacity.min(cap1.max(cap2));
@@ -1187,7 +1207,6 @@ impl eframe::App for HydronGuiApp {
                 connected_sats_per_gs[gs_idx].push((id1.clone(), "LEO", capacity, self.leo_max_bitrate));
                 gs_throughputs[gs_idx] += capacity as f32;
                 total_throughput += capacity as f32;
-                sat_has_sgl.insert(id1.clone());
                 sat_sgl_link.insert(id1.clone(), (gs_name.clone(), capacity));
             } else {
                 let (id2, type2, _) = &all_sats[j];
@@ -1235,34 +1254,6 @@ impl eframe::App for HydronGuiApp {
         // 2. GUI panels layout - Tabbed Ribbon Interface
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(4.0);
-            // Unified, reflowing header. horizontal_wrapped() lets the controls and
-            // tab bar flow onto multiple rows on narrow viewports instead of overflowing,
-            // so the same layout serves phones and desktops without a hard breakpoint.
-            ui.horizontal_wrapped(|ui| {
-                // A compact strong label (not ui.heading) keeps every item on this row the
-                // same height, so the row wraps cleanly on narrow viewports instead of the
-                // tall heading colliding with the wrapped controls below it.
-                ui.label(egui::RichText::new("🛰 HydRON Digital Twin").size(18.0).strong());
-                ui.separator();
-                if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" }).clicked() {
-                    self.is_running = !self.is_running;
-                    self.log(if self.is_running { "Simulation Resumed" } else { "Simulation Paused" });
-                }
-                if ui.button("↺ Reset").clicked() {
-                    pending_reset = true;
-                }
-                ui.label(format!("t={:.0}s", self.current_time));
-                ui.separator();
-                ui.menu_button("🪟 HUDs", |ui| {
-                    ui.checkbox(&mut self.show_telemetry_hud, "📊 Telemetria");
-                    ui.checkbox(&mut self.show_stations_hud, "🏠 Stazioni di Terra");
-                    ui.checkbox(&mut self.show_leo_list_hud, "📶 Bitrates");
-                    ui.checkbox(&mut self.show_logs_hud, "📝 Console Logs");
-                });
-            });
-
-            ui.add_space(2.0);
-
             // Tab selector: single fixed-height row that scrolls horizontally when the
             // window is too narrow to show all tabs, instead of wrapping onto a second row.
             egui::ScrollArea::horizontal()
@@ -1323,6 +1314,13 @@ impl eframe::App for HydronGuiApp {
                                     ui.add(egui::Slider::new(&mut self.time_warp, -50..=50).text("x"));
                                     ui.separator();
                                     ui.label(format!("Epoch: {:.1}s", self.current_time));
+                                    ui.separator();
+                                    // Real-time render rate. stable_dt is egui's smoothed frame
+                                    // time; the warp advances |time_warp| sim-seconds per frame,
+                                    // so the effective speed is time_warp * fps sim-seconds/second.
+                                    let dt = ui.ctx().input(|i| i.stable_dt);
+                                    let fps = if dt > 0.0 { 1.0 / dt } else { 0.0 };
+                                    ui.label(format!("{:.0} FPS", fps));
                                 });
                             });
                         });
@@ -2287,14 +2285,25 @@ impl eframe::App for HydronGuiApp {
         }
         }
 
-        egui::TopBottomPanel::bottom("bottom_panel").height_range(130.0..=170.0).show(ctx, |ui| {
-            ui.heading("📊 Grafico Storico Throughput Stazioni di Terra");
-            let (rect, _response) = ui.allocate_exact_size(
-                ui.available_size(),
-                egui::Sense::hover()
-            );
-            self.draw_throughput_chart(ui, rect);
-        });
+        // Throughput chart panel: height is relative to the window and can be dragged
+        // (grab the top edge of the panel). egui persists the user's chosen height across
+        // frames via the panel id, while the bounds stay proportional to the window so it
+        // never collapses or swallows the whole view when the window is resized.
+        let screen_h = ctx.screen_rect().height();
+        // Clamp the max above the min so a very short window can never invert the range.
+        let chart_max_h = (screen_h * 0.6).max(120.0);
+        egui::TopBottomPanel::bottom("bottom_panel")
+            .resizable(true)
+            .default_height(screen_h * 0.22)
+            .height_range(90.0..=chart_max_h)
+            .show(ctx, |ui| {
+                ui.heading("📊 Grafico Storico Throughput Stazioni di Terra");
+                let (rect, _response) = ui.allocate_exact_size(
+                    ui.available_size(),
+                    egui::Sense::hover()
+                );
+                self.draw_throughput_chart(ui, rect);
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Visualizzazione Costellazione 3D (Trascina per ruotare il globo)");

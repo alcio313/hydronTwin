@@ -2,6 +2,88 @@ use crate::math::normalize;
 use crate::math::{norm, dot};
 use crate::models::SimEnvironment;
 
+/// One satellite as a node in the ground-reach routing graph.
+pub struct RouteNode {
+    /// MEO/GEO relays can forward traffic for other satellites; LEO terminals cannot.
+    pub is_relay: bool,
+    /// Maximum bitrate the satellite's payload can handle (Gbps).
+    pub max_cap: f64,
+    /// Reference distance used for the space-to-ground (SGL) free-space loss model.
+    pub sgl_ref_dist: f64,
+    /// Reference distance used for the inter-satellite (ISL) free-space loss model.
+    pub isl_ref_dist: f64,
+    /// ECI position (m).
+    pub r: [f64; 3],
+}
+
+/// Compute, for every satellite, the widest-path (max-bottleneck) capacity to reach the
+/// ground network — allowing traffic to be relayed through one or more MEO/GEO relay
+/// satellites when a satellite is not directly connected to a ground station.
+///
+/// A relay that has no direct ground link can still reach the ground through another relay;
+/// the end-to-end rate is limited at each hop by the relay's maximum capacity and by the
+/// inter-satellite link capacity, which in turn caps the bitrate available to LEO terminals
+/// transmitting to ground via the network.
+///
+/// Returns, per satellite, `cap_to_ground`: the largest achievable bottleneck bitrate to the
+/// ground (0 if it can reach neither a ground station nor a relay that does).
+pub fn compute_ground_reach(
+    nodes: &[RouteNode],
+    gs_eci: &[[f64; 3]],
+    gs_k: &[f64],
+    env: &SimEnvironment,
+) -> Vec<f64> {
+    let n = nodes.len();
+    let mut direct_sgl = vec![0.0_f64; n];
+
+    // Base case: the best direct space-to-ground link for each satellite.
+    for (idx, node) in nodes.iter().enumerate() {
+        let mut best_cap = 0.0_f64;
+        for (i, gs) in gs_eci.iter().enumerate() {
+            let cap = compute_link_capacity(
+                node.r, *gs, true, gs_k[i], node.sgl_ref_dist, node.max_cap, env,
+            )
+            .min(node.max_cap);
+            if cap > best_cap {
+                best_cap = cap;
+            }
+        }
+        direct_sgl[idx] = best_cap;
+    }
+
+    // Widest-path relaxation: a node can improve its reach by forwarding through a relay
+    // neighbour that already reaches the ground. Each pass can extend the best path by one
+    // more relay hop, so it converges in at most `n` passes; the extra cap is a safety bound.
+    let mut cap_to_ground = direct_sgl.clone();
+    for _ in 0..=n {
+        let mut changed = false;
+        for a in 0..n {
+            for b in 0..n {
+                if a == b || !nodes[b].is_relay || cap_to_ground[b] <= 0.0 {
+                    continue;
+                }
+                if !visible(nodes[a].r, nodes[b].r, env.r_earth) {
+                    continue;
+                }
+                let nominal = nodes[a].max_cap.min(nodes[b].max_cap);
+                let isl = compute_link_capacity(
+                    nodes[a].r, nodes[b].r, false, 0.0, nodes[a].isl_ref_dist, nominal, env,
+                );
+                let via = nodes[a].max_cap.min(isl).min(cap_to_ground[b]);
+                if via > cap_to_ground[a] + 1e-9 {
+                    cap_to_ground[a] = via;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    cap_to_ground
+}
+
 pub fn visible(r1: [f64; 3], r2: [f64; 3], r_earth: f64) -> bool {
     let d = [r2[0] - r1[0], r2[1] - r1[1], r2[2] - r1[2]];
     let d_len_sq = dot(d, d);
