@@ -45,6 +45,11 @@ pub struct RouteParams {
     /// Pointing/acquisition time (s) during which a newly established laser
     /// link carries no traffic.
     pub acquisition_time_s: f64,
+    /// Minimum dwell time (s) after a handover before the terminal may hand
+    /// over again *voluntarily*. A physically dead link (occluded / below the
+    /// elevation mask) can always be abandoned. This prevents ping-pong when
+    /// link qualities fluctuate quickly (e.g. weather transitions).
+    pub min_dwell_s: f64,
 }
 
 /// What a satellite's laser terminal is currently pointed at.
@@ -59,6 +64,8 @@ pub struct LinkState {
     pub target: LinkTarget,
     /// Remaining acquisition time (s); the link carries no traffic until 0.
     pub acquiring: f64,
+    /// Remaining minimum-dwell time (s); voluntary handovers are blocked until 0.
+    pub cooldown: f64,
 }
 
 /// Per-satellite link state persisted between routing passes: this is what
@@ -153,15 +160,16 @@ fn target_label(target: &LinkTarget) -> &str {
 
 /// Update the link memory for `sat_id` toward `new_target`. Returns the
 /// remaining acquisition time for this pass (0 = link established and usable).
+/// A target change (re)arms both the acquisition and the minimum-dwell timers.
 fn update_link_state(
     memory: &mut LinkMemory,
     events: &mut Vec<String>,
     sat_id: &str,
     new_target: LinkTarget,
-    acquisition_time_s: f64,
+    params: &RouteParams,
 ) -> f64 {
-    let acquiring = match memory.links.get(sat_id) {
-        Some(st) if st.target == new_target => st.acquiring,
+    let (acquiring, cooldown) = match memory.links.get(sat_id) {
+        Some(st) if st.target == new_target => (st.acquiring, st.cooldown),
         Some(st) => {
             events.push(format!(
                 "{} handover: {} → {} (acquiring)",
@@ -169,7 +177,7 @@ fn update_link_state(
                 target_label(&st.target),
                 target_label(&new_target)
             ));
-            acquisition_time_s
+            (params.acquisition_time_s, params.acquisition_time_s + params.min_dwell_s)
         }
         None => {
             events.push(format!(
@@ -177,10 +185,10 @@ fn update_link_state(
                 sat_id,
                 target_label(&new_target)
             ));
-            acquisition_time_s
+            (params.acquisition_time_s, params.acquisition_time_s + params.min_dwell_s)
         }
     };
-    memory.links.insert(sat_id.to_string(), LinkState { target: new_target, acquiring });
+    memory.links.insert(sat_id.to_string(), LinkState { target: new_target, acquiring, cooldown });
     acquiring
 }
 
@@ -229,12 +237,13 @@ pub fn route_network(
         events: Vec::new(),
     };
 
-    // --- Link memory upkeep: drop vanished satellites, advance acquisitions ---
+    // --- Link memory upkeep: drop vanished satellites, advance the timers ---
     {
         let ids: std::collections::HashSet<&str> = nodes.iter().map(|s| s.id.as_str()).collect();
         memory.links.retain(|id, _| ids.contains(id.as_str()));
         for st in memory.links.values_mut() {
             st.acquiring = (st.acquiring - dt).max(0.0);
+            st.cooldown = (st.cooldown - dt).max(0.0);
         }
     }
 
@@ -256,14 +265,17 @@ pub fn route_network(
             }
         }
 
-        // Hysteresis: keep the current station while it works well enough.
+        // Keep the current station while it is physically alive and either the
+        // dwell cooldown is running or no alternative is decisively better.
         let mut chosen_j = best_j;
         let mut chosen_link = best_link;
-        if let Some(LinkState { target: LinkTarget::Ground(gs_id), .. }) = memory.links.get(&nodes[i].id) {
+        if let Some(LinkState { target: LinkTarget::Ground(gs_id), cooldown, .. }) = memory.links.get(&nodes[i].id) {
             if let Some(cur_j) = gs.iter().position(|g| &g.id == gs_id) {
                 let cur_cap = sgl_capacity(&nodes[i], &gs[cur_j], env);
                 let cur_score = cur_cap.min(gs_residual[cur_j]);
-                if cur_cap > 0.0 && best_score <= params.hysteresis * cur_score {
+                if cur_cap > 0.0
+                    && (*cooldown > 0.0 || best_score <= params.hysteresis * cur_score)
+                {
                     chosen_j = cur_j;
                     chosen_link = cur_cap;
                 }
@@ -279,7 +291,7 @@ pub fn route_network(
             &mut result.events,
             &nodes[i].id,
             LinkTarget::Ground(gs[chosen_j].id.clone()),
-            params.acquisition_time_s,
+            params,
         );
         relay_gs[i] = chosen_j;
         relay_acquiring[i] = acquiring > 0.0;
@@ -394,23 +406,28 @@ pub fn route_network(
         }
         let best_alt_val = direct_val.max(relay_val);
 
-        // Incumbent link value under the same residuals.
-        let mut incumbent: Option<(LinkTarget, f64, usize)> = None; // (target, value, idx)
+        // Incumbent link: physical feasibility (line of sight, elevation mask)
+        // is separate from the allocatable value — a link to a relay that is
+        // momentarily without ground egress stays pointed at zero traffic
+        // instead of being dropped and re-acquired.
+        // (target, allocatable value, idx, cooldown active)
+        let mut incumbent: Option<(LinkTarget, f64, usize, bool)> = None;
         if let Some(st) = memory.links.get(&nodes[i].id) {
+            let cooling = st.cooldown > 0.0;
             match &st.target {
                 LinkTarget::Ground(gs_id) if !params.prioritize_relay => {
                     if let Some(j) = gs.iter().position(|g| &g.id == gs_id) {
-                        let v = sgl_capacity(&nodes[i], &gs[j], env).min(gs_residual[j]);
-                        if v > 0.0 {
-                            incumbent = Some((st.target.clone(), v, j));
+                        let cap = sgl_capacity(&nodes[i], &gs[j], env);
+                        if cap > 0.0 {
+                            incumbent = Some((st.target.clone(), cap.min(gs_residual[j]), j, cooling));
                         }
                     }
                 }
                 LinkTarget::Sat(sat_id) => {
                     if let Some(b) = nodes.iter().position(|s| &s.id == sat_id) {
-                        let v = leo_isl_value(b, &isl_used, &reach);
-                        if v > 0.0 {
-                            incumbent = Some((st.target.clone(), v, b));
+                        if nodes[b].is_relay && isl_capacity(nodes, i, b, env) > 0.0 {
+                            let v = leo_isl_value(b, &isl_used, &reach);
+                            incumbent = Some((st.target.clone(), v, b, cooling));
                         }
                     }
                 }
@@ -418,20 +435,25 @@ pub fn route_network(
             }
         }
 
-        // Hysteresis decision: keep the incumbent unless the alternative is
-        // decisively better (or the incumbent is gone).
-        let (target, value, idx) = match incumbent {
-            Some((t, v, idx)) if best_alt_val <= params.hysteresis * v => (t, v, idx),
-            _ => {
-                if relay_val > direct_val && first_hop != usize::MAX {
-                    (LinkTarget::Sat(nodes[first_hop].id.clone()), relay_val, first_hop)
-                } else if direct_j != usize::MAX && direct_val > 0.0 {
-                    (LinkTarget::Ground(gs[direct_j].id.clone()), direct_val, direct_j)
-                } else {
-                    memory.links.remove(&nodes[i].id);
-                    continue;
-                }
+        // Decision: hold the incumbent while its dwell cooldown runs or while
+        // no alternative is decisively better; hand over otherwise. A dead
+        // incumbent (no line of sight) is always abandoned.
+        let keep_incumbent = match &incumbent {
+            Some((_, v, _, cooling)) => {
+                *cooling || best_alt_val <= params.hysteresis * v || best_alt_val <= 0.0
             }
+            None => false,
+        };
+        let (target, value, idx) = if keep_incumbent {
+            let (t, v, idx, _) = incumbent.expect("checked above");
+            (t, v, idx)
+        } else if relay_val > direct_val && first_hop != usize::MAX {
+            (LinkTarget::Sat(nodes[first_hop].id.clone()), relay_val, first_hop)
+        } else if direct_j != usize::MAX && direct_val > 0.0 {
+            (LinkTarget::Ground(gs[direct_j].id.clone()), direct_val, direct_j)
+        } else {
+            memory.links.remove(&nodes[i].id);
+            continue;
         };
 
         let acquiring = update_link_state(
@@ -439,10 +461,12 @@ pub fn route_network(
             &mut result.events,
             &nodes[i].id,
             target.clone(),
-            params.acquisition_time_s,
+            params,
         );
-        if acquiring > 0.0 {
-            // Terminal busy pointing: link visible on the map, no traffic yet.
+        if acquiring > 0.0 || value <= 0.0 {
+            // Terminal busy pointing, or link held with no allocatable
+            // capacity right now (e.g. relay re-acquiring its own SGL):
+            // visible on the map, no traffic.
             match target {
                 LinkTarget::Ground(_) => result.sgl_links.push((i, idx, 0.0)),
                 LinkTarget::Sat(_) => result.isl_links.push((i, idx, 0.0)),
@@ -666,7 +690,7 @@ mod tests {
     }
 
     fn params(prioritize_relay: bool) -> RouteParams {
-        RouteParams { prioritize_relay, hysteresis: 1.3, acquisition_time_s: 0.0 }
+        RouteParams { prioritize_relay, hysteresis: 1.3, acquisition_time_s: 0.0, min_dwell_s: 0.0 }
     }
 
     /// One-shot routing pass with fresh memory and zero acquisition time:
@@ -837,9 +861,88 @@ mod tests {
     }
 
     #[test]
+    fn dwell_cooldown_blocks_pingpong() {
+        let env = test_env();
+        let p = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 0.0, min_dwell_s: 30.0 };
+        let mut memory = LinkMemory::new();
+        // Two co-visible stations; which one is better is driven by weather (k_value).
+        let mk_gs = |k_a: f64, k_b: f64| {
+            vec![
+                GroundNode { id: "GA".into(), r: [R_EARTH, 0.0, 0.0], k_value: k_a, capacity: f64::INFINITY, min_elev_rad: 0.0 },
+                GroundNode { id: "GB".into(), r: [R_EARTH * 0.985, R_EARTH * 0.174, 0.0], k_value: k_b, capacity: f64::INFINITY, min_elev_rad: 0.0 },
+            ]
+        };
+        let mk_sat = || {
+            let mut s = node([R_EARTH + 800_000.0, 0.0, 0.0], false, 40.0);
+            s.id = "LEO".into();
+            s
+        };
+
+        // Pass 1: GA clear, GB stormy → links GA (dwell timer armed).
+        let res = route_network(&[mk_sat()], &mk_gs(0.0, 5.0 / 1000.0), &p, &mut memory, 0.0, &env);
+        assert_eq!(res.sgl_links[0].1, 0);
+
+        // Weather flips: GA stormy, GB clear — decisively better, but the
+        // dwell cooldown is running → the terminal must stay on GA.
+        let res = route_network(&[mk_sat()], &mk_gs(5.0 / 1000.0, 0.0), &p, &mut memory, 5.0, &env);
+        assert_eq!(res.sgl_links[0].1, 0, "cooldown must block the voluntary handover");
+        assert!(res.events.is_empty(), "{:?}", res.events);
+
+        // After the dwell expires the handover is allowed.
+        let res = route_network(&[mk_sat()], &mk_gs(5.0 / 1000.0, 0.0), &p, &mut memory, 40.0, &env);
+        assert_eq!(res.sgl_links[0].1, 1, "handover allowed after the dwell");
+        assert!(res.events.iter().any(|e| e.contains("handover")));
+    }
+
+    #[test]
+    fn held_isl_survives_relay_egress_outage() {
+        let env = test_env();
+        let p = RouteParams { prioritize_relay: true, hysteresis: 1.3, acquisition_time_s: 10.0, min_dwell_s: 60.0 };
+        let mut memory = LinkMemory::new();
+        let mk_world = |gs_visible: bool| {
+            let mut leo = node([R_EARTH + 550_000.0, 0.0, 0.0], false, 15.0);
+            leo.id = "LEO".into();
+            let mut relay = node([R_EARTH + 10_000_000.0, 0.0, 0.0], true, 20.0);
+            relay.id = "MEO".into();
+            let gs_r = if gs_visible { [R_EARTH, 0.0, 0.0] } else { [-R_EARTH, 0.0, 0.0] };
+            (vec![leo, relay], vec![GroundNode { id: "GA".into(), r: gs_r, k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 }])
+        };
+
+        // Establish LEO → MEO → GA. Acquisitions are sequential: first the
+        // relay's SGL comes up, only then the LEO can start acquiring its ISL.
+        let (nodes, gs) = mk_world(true);
+        route_network(&nodes, &gs, &p, &mut memory, 0.0, &env);
+        route_network(&nodes, &gs, &p, &mut memory, 15.0, &env);
+        let res = route_network(&nodes, &gs, &p, &mut memory, 15.0, &env);
+        assert!(res.sat_ground_rate[0] > 0.0, "chain should be up");
+
+        // The relay loses its station (behind the planet): the LEO must HOLD
+        // its ISL at zero traffic instead of dropping the link.
+        let (nodes, gs) = mk_world(false);
+        let res = route_network(&nodes, &gs, &p, &mut memory, 5.0, &env);
+        assert_eq!(res.sat_ground_rate[0], 0.0);
+        assert!(
+            res.isl_links.iter().any(|&(a, b, c)| (a == 0 || b == 0) && c == 0.0),
+            "held ISL should be reported at 0: {:?}", res.isl_links
+        );
+        assert!(res.events.is_empty(), "no handover events expected: {:?}", res.events);
+
+        // Station returns: traffic resumes WITHOUT a new acquisition.
+        let (nodes, gs) = mk_world(true);
+        // (two passes: the relay's own SGL must re-acquire after its outage)
+        route_network(&nodes, &gs, &p, &mut memory, 5.0, &env);
+        let res = route_network(&nodes, &gs, &p, &mut memory, 15.0, &env);
+        assert!(res.sat_ground_rate[0] > 0.0, "chain should resume");
+        assert!(
+            !res.events.iter().any(|e| e.starts_with("LEO")),
+            "the LEO must not re-acquire: {:?}", res.events
+        );
+    }
+
+    #[test]
     fn acquisition_delay_blocks_traffic_then_releases() {
         let env = test_env();
-        let p = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 30.0 };
+        let p = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 30.0, min_dwell_s: 0.0 };
         let mut memory = LinkMemory::new();
         let mk_sat = || {
             let mut s = node([R_EARTH + 800_000.0, 0.0, 0.0], false, 40.0);
@@ -866,7 +969,7 @@ mod tests {
     #[test]
     fn handover_on_link_loss_requires_reacquisition() {
         let env = test_env();
-        let p = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 10.0 };
+        let p = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 10.0, min_dwell_s: 120.0 };
         let mut memory = LinkMemory::new();
         let mk_gs = |ga_visible: bool| {
             let ga_r = if ga_visible { [R_EARTH, 0.0, 0.0] } else { [-R_EARTH, 0.0, 0.0] };
@@ -892,6 +995,93 @@ mod tests {
         assert_eq!(res.sgl_links[0].1, 1, "must fail over to GB");
         assert_eq!(res.sgl_links[0].2, 0.0, "failover link must re-acquire");
         assert!(res.events.iter().any(|e| e.contains("handover")));
+    }
+
+    #[test]
+    #[ignore] // temporary diagnostic, run explicitly with --ignored --nocapture
+    fn diag_full_constellation_over_time() {
+        use crate::adcs::{compute_adcs_command, nadir_target_quaternion, AdcsGains, SensorNoise};
+        use crate::math::{lla_to_ecef, mat_vec_mult, eci_to_ecef_matrix, rotate_vector_q, Lcg};
+        use crate::physics::{dipole_field_eci, step_atmosphere, step_attitude, step_orbit, sun_direction};
+        use crate::simulation::create_satellites_from_config;
+        use crate::models::{AtmosphereModel, OrbitType};
+
+        let config = crate::app::default_config();
+        let mut constellation = create_satellites_from_config(&config);
+        let mut stations = config.stations.clone();
+        let mut atmos = AtmosphereModel {
+            states: config.atmos_states.clone(),
+            k_values: config.atmos_k.clone(),
+            transition_matrix: config.transition_matrix.clone(),
+            lcg: Lcg::new(42),
+        };
+        let mut sensor_rng = Lcg::new(2024);
+        let mut memory = LinkMemory::new();
+        let p = RouteParams {
+            prioritize_relay: false,
+            hysteresis: config.handover_hysteresis,
+            acquisition_time_s: config.acquisition_time_s,
+            min_dwell_s: config.min_dwell_s,
+        };
+        let gains = AdcsGains::default();
+        let noise = SensorNoise::default();
+
+        let mut t = 0.0_f64;
+        let mut total_events = 0usize;
+        let mut min_tp = f64::INFINITY;
+        let mut max_tp = 0.0_f64;
+        for step in 0..600 {
+            // physics step (mirrors app update loop)
+            for gs in stations.iter_mut() {
+                step_atmosphere(gs, &mut atmos);
+            }
+            let sun = sun_direction(t);
+            let gst = t * 7.292115e-5;
+            for seg in &mut constellation.segments {
+                for sat in &mut seg.satellites {
+                    let b_eci = dipole_field_eci(sat.r, gst, config.env.r_earth);
+                    let q_t = nadir_target_quaternion(sat.r, sat.v);
+                    let b_body = rotate_vector_q(sat.q, b_eci);
+                    let (rw, mtq) = compute_adcs_command(sat, q_t, b_body, &gains, &noise, &mut sensor_rng);
+                    step_orbit(sat, 1.0, &config.env, sun);
+                    step_attitude(sat, 1.0, b_eci, rw, mtq, [0.0; 3]);
+                }
+            }
+            t += 1.0;
+
+            // routing pass
+            let rot = eci_to_ecef_matrix(gst);
+            let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
+            let mut nodes = Vec::new();
+            for seg in &constellation.segments {
+                for sat in &seg.satellites {
+                    let (max_cap, sgl_ref, isl_ref, is_relay) = match sat.orbit_type {
+                        OrbitType::LEO => (100.0, config.ref_dist_sgl_km, config.ref_dist_isl_km, false),
+                        OrbitType::MEO => (400.0, config.meo_alt_km, config.meo_alt_km, true),
+                        OrbitType::GEO => (800.0, config.geo_alt_km, config.geo_alt_km, true),
+                    };
+                    nodes.push(RouteNode { id: sat.id.clone(), is_relay, max_cap, sgl_ref_dist: sgl_ref, isl_ref_dist: isl_ref, r: sat.r, point_factor: 1.0 });
+                }
+            }
+            let gs_nodes: Vec<GroundNode> = stations.iter().map(|gs| {
+                let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                GroundNode { id: gs.id.clone(), r: mat_vec_mult(rot_t, ecef), k_value: gs.k_value, capacity: gs.downlink_nominal_gbps, min_elev_rad: config.min_elevation_deg.to_radians() }
+            }).collect();
+            let res = route_network(&nodes, &gs_nodes, &p, &mut memory, 1.0, &env_of(&config));
+            total_events += res.events.len();
+            if step >= 60 {
+                min_tp = min_tp.min(res.total_throughput);
+                max_tp = max_tp.max(res.total_throughput);
+            }
+            if step % 60 == 0 || !res.events.is_empty() {
+                println!("t={step:4}s tp={:7.1} events={:?}", res.total_throughput, res.events);
+            }
+        }
+        println!("=== total events: {total_events}, tp range after 60s: {min_tp:.1}..{max_tp:.1}");
+    }
+
+    fn env_of(config: &crate::config::Config) -> SimEnvironment {
+        config.env.clone()
     }
 
     #[test]

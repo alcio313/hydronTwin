@@ -83,6 +83,8 @@ pub struct Config {
     pub handover_hysteresis: f64,
     /// Pointing/acquisition time (s) before a new laser link carries traffic.
     pub acquisition_time_s: f64,
+    /// Minimum dwell (s) after a handover before another voluntary handover.
+    pub min_dwell_s: f64,
     pub adcs: AdcsConfig,
 }
 
@@ -140,6 +142,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut min_elevation_deg = 5.0;
     let mut handover_hysteresis = 1.3;
     let mut acquisition_time_s = 20.0;
+    let mut min_dwell_s = 60.0;
     let mut adcs = AdcsConfig::default();
 
     let mut current_section = String::new();
@@ -290,6 +293,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
                         "min_elevation_deg" => min_elevation_deg = val.parse().unwrap_or(min_elevation_deg),
                         "handover_hysteresis" => handover_hysteresis = val.parse().unwrap_or(handover_hysteresis),
                         "acquisition_time_s" => acquisition_time_s = val.parse().unwrap_or(acquisition_time_s),
+                        "min_dwell_s" => min_dwell_s = val.parse().unwrap_or(min_dwell_s),
                         _ => {}
                     }
                 }
@@ -381,6 +385,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
         min_elevation_deg,
         handover_hysteresis,
         acquisition_time_s,
+        min_dwell_s,
         adcs,
     })
 }

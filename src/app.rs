@@ -376,6 +376,7 @@ impl HydronGuiApp {
             prioritize_relay: self.prioritize_relay,
             hysteresis: self.config.handover_hysteresis,
             acquisition_time_s: self.config.acquisition_time_s,
+            min_dwell_s: self.config.min_dwell_s,
         };
         let mut export_memory = LinkMemory::new();
 
@@ -722,6 +723,7 @@ impl HydronGuiApp {
         toml.push_str(&format!("min_elevation_deg = {:.1}\n", c.min_elevation_deg));
         toml.push_str(&format!("handover_hysteresis = {:.2}\n", c.handover_hysteresis));
         toml.push_str(&format!("acquisition_time_s = {:.1}\n", c.acquisition_time_s));
+        toml.push_str(&format!("min_dwell_s = {:.1}\n", c.min_dwell_s));
 
         toml
     }
@@ -1028,6 +1030,7 @@ impl eframe::App for HydronGuiApp {
             prioritize_relay: self.prioritize_relay,
             hysteresis: self.config.handover_hysteresis,
             acquisition_time_s: self.config.acquisition_time_s,
+            min_dwell_s: self.config.min_dwell_s,
         };
         // Simulated seconds since the previous pass drive the acquisition timers.
         let route_dt = (self.current_time - self.last_routed_time).max(0.0);
@@ -3096,6 +3099,7 @@ pub fn default_config() -> Config {
         min_elevation_deg: 5.0,
         handover_hysteresis: 1.3,
         acquisition_time_s: 20.0,
+        min_dwell_s: 60.0,
         adcs: AdcsConfig::default(),
     }
 }

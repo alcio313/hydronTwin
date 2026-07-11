@@ -380,12 +380,12 @@ mod tests {
             }];
             // Station straight below, no weather attenuation.
             let gs = vec![GroundNode { id: "GS".to_string(), r: [6378137.0, 0.0, 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 }];
-            let params = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 0.0 };
+            let params = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 0.0, min_dwell_s: 0.0 };
             let mut memory = LinkMemory::new();
             route_network(&nodes, &gs, &params, &mut memory, 0.0, &env).sat_ground_rate[0]
         };
 
-        let mut step = |sat: &mut Satellite, tau_ext: [f64; 3], rng: &mut Lcg| {
+        let step = |sat: &mut Satellite, tau_ext: [f64; 3], rng: &mut Lcg| {
             let q_t = nadir_target_quaternion(sat.r, sat.v);
             let b_body = rotate_vector_q(sat.q, b_eci);
             let (rw, mtq) = compute_adcs_command(sat, q_t, b_body, &gains, &noise, rng);
