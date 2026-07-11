@@ -1280,11 +1280,15 @@ impl eframe::App for HydronGuiApp {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("CONTROL").strong().color(egui::Color32::LIGHT_BLUE));
                                 ui.horizontal(|ui| {
-                                    if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" }).clicked() {
+                                    if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" })
+                                        .on_hover_text("Toggle real-time simulation propagation")
+                                        .clicked() {
                                         self.is_running = !self.is_running;
                                         self.log(if self.is_running { "Simulation Resumed" } else { "Simulation Paused" });
                                     }
-                                    if ui.button("⏭ Step").clicked() {
+                                    if ui.button("⏭ Step")
+                                        .on_hover_text("Advance the simulation state by a single time step")
+                                        .clicked() {
                                         self.is_running = false;
                                         self.current_time += self.step_size;
                                         let sun_vector = [1.0, 0.0, 0.0];
@@ -1300,7 +1304,9 @@ impl eframe::App for HydronGuiApp {
                                         }
                                         self.log("Single Step Executed");
                                     }
-                                    if ui.button("↺ Reset").clicked() {
+                                    if ui.button("↺ Reset")
+                                        .on_hover_text("Reset constellations and simulation state back to initial configuration values")
+                                        .clicked() {
                                         pending_reset = true;
                                     }
                                 });
@@ -1321,7 +1327,9 @@ impl eframe::App for HydronGuiApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("REPORTS").strong().color(egui::Color32::LIGHT_BLUE));
-                                if ui.button("📥 Esporta 24h CSV").clicked() {
+                                if ui.button("📥 Esporta 24h CSV")
+                                    .on_hover_text("Run a full 24-hour constellation simulation sequence and export results to a CSV file")
+                                    .clicked() {
                                     match self.run_and_export_24h() {
                                         Ok(file) => {
                                             self.log(&format!("Dati di 24h esportati in '{}'", file));
@@ -1572,7 +1580,9 @@ impl eframe::App for HydronGuiApp {
                                             ui.label("Color:");
                                             egui::color_picker::color_edit_button_rgb(ui, &mut self.add_sat_color);
                                         });
-                                        if ui.button("➕ Add").clicked() {
+                                        if ui.button("➕ Add")
+                                            .on_hover_text("Add a new custom satellite to the constellation using the configured parameters")
+                                            .clicked() {
                                             let r_earth = self.config.env.r_earth;
                                             let r_mag = r_earth + self.add_sat_alt_km * 1000.0;
                                             let v_mag = (self.config.env.mu / r_mag).sqrt();
@@ -1735,7 +1745,9 @@ impl eframe::App for HydronGuiApp {
                                             ui.label("Color:");
                                             egui::color_picker::color_edit_button_rgb(ui, &mut self.add_const_color);
                                         });
-                                        if ui.button("➕ Create").clicked() {
+                                        if ui.button("➕ Create")
+                                            .on_hover_text("Generate a multi-satellite, multi-plane orbit constellation based on these parameters")
+                                            .clicked() {
                                             let mut final_const_name = self.add_const_name.clone();
                                             let mut suffix_idx = 1;
                                             loop {
@@ -1861,7 +1873,9 @@ impl eframe::App for HydronGuiApp {
                                         ui.add(egui::Slider::new(&mut self.sat_mass_input, 1.0..=500.0).text("Mass (kg)"));
                                         ui.add(egui::Slider::new(&mut self.sat_cd_input, 0.0..=4.0).text("Cd"));
                                         ui.add(egui::Slider::new(&mut self.sat_cr_input, 0.0..=3.0).text("Cr"));
-                                        if ui.button("Apply Parameters").clicked() {
+                                        if ui.button("Apply Parameters")
+                                            .on_hover_text("Apply the edited mass, drag coefficient, and solar radiation coefficient to the selected satellite")
+                                            .clicked() {
                                             let id = self.selected_satellite_id.clone();
                                             for seg in &mut self.constellation.segments {
                                                 for s in &mut seg.satellites {
@@ -1885,7 +1899,9 @@ impl eframe::App for HydronGuiApp {
                                         ui.add(egui::Slider::new(&mut self.disturbance_val[0], -10.0..=10.0).text("Tx"));
                                         ui.add(egui::Slider::new(&mut self.disturbance_val[1], -10.0..=10.0).text("Ty"));
                                         ui.add(egui::Slider::new(&mut self.disturbance_val[2], -10.0..=10.0).text("Tz"));
-                                        if ui.button("⚡ Inject Torque").clicked() {
+                                        if ui.button("⚡ Inject Torque")
+                                            .on_hover_text("Inject a 3-axis external disturbance torque to test the attitude control stabilization algorithm")
+                                            .clicked() {
                                             self.force_disturbance = true;
                                         }
                                     });
@@ -1977,7 +1993,9 @@ impl eframe::App for HydronGuiApp {
                                                                 self.ground_stations[i].alt_m = 100.0;
                                                             }
                                                         }
-                                                        if ui.button("❌").clicked() {
+                                                        if ui.button("❌")
+                                                            .on_hover_text("Delete this ground station")
+                                                            .clicked() {
                                                             to_remove = Some(i);
                                                         }
                                                     });
@@ -2000,7 +2018,9 @@ impl eframe::App for HydronGuiApp {
                                         if let Some(idx) = to_remove {
                                             pending_remove = Some(idx);
                                         }
-                                        if ui.button("➕ Add Station").clicked() {
+                                        if ui.button("➕ Add Station")
+                                            .on_hover_text("Add a new ground station at default equatorial coordinates")
+                                            .clicked() {
                                             pending_add = true;
                                         }
                                     });
