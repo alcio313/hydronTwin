@@ -111,3 +111,7 @@ ref_distance_sgl_km = 1000.0
 pointing_ref_mrad = 5.0
 # Minimum elevation (deg) for usable optical ground links
 min_elevation_deg = 5.0
+# A laser link is handed over only when the alternative is this factor better
+handover_hysteresis = 1.3
+# Pointing/acquisition time (s) before a new laser link carries traffic
+acquisition_time_s = 20.0

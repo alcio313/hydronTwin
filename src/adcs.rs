@@ -350,7 +350,7 @@ mod tests {
     /// then recover both attitude and capacity.
     #[test]
     fn injected_disturbance_degrades_link_then_recovers() {
-        use crate::network::{route_network, GroundNode, RouteNode};
+        use crate::network::{route_network, GroundNode, LinkMemory, RouteNode, RouteParams};
 
         let env = test_env();
         let mut sat = leo_sat();
@@ -370,6 +370,7 @@ mod tests {
         let capacity_of = |sat: &Satellite| -> f64 {
             let err = pointing_error_rad(sat.q, nadir_target_quaternion(sat.r, sat.v));
             let nodes = vec![RouteNode {
+                id: "LEO".to_string(),
                 is_relay: false,
                 max_cap: 100.0,
                 sgl_ref_dist: 1000.0,
@@ -378,8 +379,10 @@ mod tests {
                 point_factor: pointing_loss_factor(err, ref_rad),
             }];
             // Station straight below, no weather attenuation.
-            let gs = vec![GroundNode { r: [6378137.0, 0.0, 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 }];
-            route_network(&nodes, &gs, false, &env).sat_ground_rate[0]
+            let gs = vec![GroundNode { id: "GS".to_string(), r: [6378137.0, 0.0, 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 }];
+            let params = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 0.0 };
+            let mut memory = LinkMemory::new();
+            route_network(&nodes, &gs, &params, &mut memory, 0.0, &env).sat_ground_rate[0]
         };
 
         let mut step = |sat: &mut Satellite, tau_ext: [f64; 3], rng: &mut Lcg| {

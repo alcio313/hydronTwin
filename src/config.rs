@@ -79,6 +79,10 @@ pub struct Config {
     pub pointing_ref_mrad: f64,
     /// Minimum elevation (deg) for usable optical ground links.
     pub min_elevation_deg: f64,
+    /// A laser link is handed over only when the alternative is this factor better.
+    pub handover_hysteresis: f64,
+    /// Pointing/acquisition time (s) before a new laser link carries traffic.
+    pub acquisition_time_s: f64,
     pub adcs: AdcsConfig,
 }
 
@@ -134,6 +138,8 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut ref_dist_sgl_km = 1000.0;
     let mut pointing_ref_mrad = 5.0;
     let mut min_elevation_deg = 5.0;
+    let mut handover_hysteresis = 1.3;
+    let mut acquisition_time_s = 20.0;
     let mut adcs = AdcsConfig::default();
 
     let mut current_section = String::new();
@@ -282,6 +288,8 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
                         "ref_distance_sgl_km" => ref_dist_sgl_km = val.parse().unwrap_or(ref_dist_sgl_km),
                         "pointing_ref_mrad" => pointing_ref_mrad = val.parse().unwrap_or(pointing_ref_mrad),
                         "min_elevation_deg" => min_elevation_deg = val.parse().unwrap_or(min_elevation_deg),
+                        "handover_hysteresis" => handover_hysteresis = val.parse().unwrap_or(handover_hysteresis),
+                        "acquisition_time_s" => acquisition_time_s = val.parse().unwrap_or(acquisition_time_s),
                         _ => {}
                     }
                 }
@@ -371,6 +379,8 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
         ref_dist_sgl_km,
         pointing_ref_mrad,
         min_elevation_deg,
+        handover_hysteresis,
+        acquisition_time_s,
         adcs,
     })
 }

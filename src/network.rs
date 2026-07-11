@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 /// One satellite as a node in the ground-reach routing graph.
 pub struct RouteNode {
+    /// Stable identifier (satellite id) used by the persistent link memory.
+    pub id: String,
     /// MEO/GEO relays can forward traffic for other satellites; LEO terminals cannot.
     pub is_relay: bool,
     /// Maximum bitrate the satellite's payload can handle (Gbps).
@@ -21,6 +23,8 @@ pub struct RouteNode {
 
 /// One ground station as seen by the routing pass.
 pub struct GroundNode {
+    /// Stable identifier (station id) used by the persistent link memory.
+    pub id: String,
     /// ECI position (m).
     pub r: [f64; 3],
     /// Atmospheric attenuation coefficient (1/m).
@@ -31,15 +35,61 @@ pub struct GroundNode {
     pub min_elev_rad: f64,
 }
 
+/// Routing policy knobs.
+pub struct RouteParams {
+    /// LEO terminals skip direct ground links and route via relays only.
+    pub prioritize_relay: bool,
+    /// A link is abandoned only when the best alternative is at least this
+    /// factor better (e.g. 1.3 = 30% better) — or when the link is lost.
+    pub hysteresis: f64,
+    /// Pointing/acquisition time (s) during which a newly established laser
+    /// link carries no traffic.
+    pub acquisition_time_s: f64,
+}
+
+/// What a satellite's laser terminal is currently pointed at.
+#[derive(Clone, PartialEq)]
+pub enum LinkTarget {
+    Ground(String),
+    Sat(String),
+}
+
+/// A currently established (or still acquiring) link.
+pub struct LinkState {
+    pub target: LinkTarget,
+    /// Remaining acquisition time (s); the link carries no traffic until 0.
+    pub acquiring: f64,
+}
+
+/// Per-satellite link state persisted between routing passes: this is what
+/// gives links inertia (hysteresis) and acquisition delays across frames.
+/// Clear it on reset, config import, or rewind.
+#[derive(Default)]
+pub struct LinkMemory {
+    pub links: HashMap<String, LinkState>,
+}
+
+impl LinkMemory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.links.clear();
+    }
+}
+
 /// Output of one routing/allocation pass over the current geometry.
 pub struct RoutingResult {
     /// Traffic actually landing at each ground station (Gbps); never exceeds its capacity.
     pub gs_throughputs: Vec<f64>,
     pub total_throughput: f64,
     /// Active space-to-ground links: (sat_idx, gs_idx, allocated Gbps).
+    /// Capacity 0 marks a link still in acquisition.
     pub sgl_links: Vec<(usize, usize, f64)>,
     /// Active inter-satellite links: (sat_i, sat_j, Gbps). For LEO first hops this
-    /// is the allocated flow; for the relay backbone it is the available capacity.
+    /// is the allocated flow (0 while acquiring); for the relay backbone it is the
+    /// available capacity.
     pub isl_links: Vec<(usize, usize, f64)>,
     /// Per-satellite bitrate of *own* traffic delivered to the ground network.
     /// Summing this vector gives `total_throughput`.
@@ -47,6 +97,8 @@ pub struct RoutingResult {
     /// Per-satellite bitrate carried by the node: own traffic for terminals,
     /// own + forwarded/transited traffic for relays (payload utilization).
     pub sat_carried_rate: Vec<f64>,
+    /// Human-readable handover / acquisition events from this pass.
+    pub events: Vec<String>,
 }
 
 /// Capacity of the ISL between nodes a and b under the link model, including
@@ -93,23 +145,67 @@ fn sgl_capacity(node: &RouteNode, gs: &GroundNode, env: &SimEnvironment) -> f64 
         * node.point_factor
 }
 
-/// Route the whole constellation to the ground with capacity accounting:
+fn target_label(target: &LinkTarget) -> &str {
+    match target {
+        LinkTarget::Ground(id) | LinkTarget::Sat(id) => id.as_str(),
+    }
+}
+
+/// Update the link memory for `sat_id` toward `new_target`. Returns the
+/// remaining acquisition time for this pass (0 = link established and usable).
+fn update_link_state(
+    memory: &mut LinkMemory,
+    events: &mut Vec<String>,
+    sat_id: &str,
+    new_target: LinkTarget,
+    acquisition_time_s: f64,
+) -> f64 {
+    let acquiring = match memory.links.get(sat_id) {
+        Some(st) if st.target == new_target => st.acquiring,
+        Some(st) => {
+            events.push(format!(
+                "{} handover: {} → {} (acquiring)",
+                sat_id,
+                target_label(&st.target),
+                target_label(&new_target)
+            ));
+            acquisition_time_s
+        }
+        None => {
+            events.push(format!(
+                "{} acquiring link → {}",
+                sat_id,
+                target_label(&new_target)
+            ));
+            acquisition_time_s
+        }
+    };
+    memory.links.insert(sat_id.to_string(), LinkState { target: new_target, acquiring });
+    acquiring
+}
+
+/// Route the whole constellation to the ground with capacity accounting and
+/// link persistence:
 ///
-/// - Phase A: each MEO/GEO relay downlinks its own traffic to the best reachable
-///   station, capped by the station's residual capacity and its own payload cap.
+/// - Phase A: each MEO/GEO relay keeps its current ground station unless the
+///   best alternative beats it by the hysteresis factor (or the link is lost).
+///   The relay's own traffic is NOT allocated yet: forwarded LEO traffic gets
+///   priority on the shared SGL pipe, and the relay fills what is left (Phase D).
 /// - Phase B: the visible relay-relay backbone is reported for display.
-/// - Phase C: each LEO is allocated sequentially (best direct SGL first in the
-///   ordering) on the *residual* widest path — direct SGL or via relay chains —
-///   decrementing every resource along the chosen path: ground station residual,
-///   each transited relay's payload residual, the exit relay's SGL headroom, and
-///   ISL link usage. A LEO keeps its 1-terminal budget: one SGL or one ISL.
+/// - Phase C: each LEO is allocated sequentially on the *residual* widest path,
+///   with the same hysteresis rule protecting its current link. A LEO keeps its
+///   1-terminal budget: one SGL or one ISL.
+/// - Newly pointed links (first contact or handover) spend `acquisition_time_s`
+///   of simulated time carrying zero traffic before becoming usable.
 ///
-/// Ground station throughputs therefore never exceed their nominal capacity and
-/// N terminals sharing a relay split its capacity instead of multiplying it.
+/// `dt` is the simulated time elapsed since the previous routing pass (0 when
+/// paused); it drives the acquisition countdowns stored in `memory`.
 pub fn route_network(
     nodes: &[RouteNode],
     gs: &[GroundNode],
-    prioritize_relay: bool,
+    params: &RouteParams,
+    memory: &mut LinkMemory,
+    dt: f64,
     env: &SimEnvironment,
 ) -> RoutingResult {
     let n = nodes.len();
@@ -120,6 +216,7 @@ pub fn route_network(
     let mut sgl_exit_residual = vec![0.0_f64; n];
     let mut exit_flow = vec![0.0_f64; n];
     let mut relay_gs = vec![usize::MAX; n];
+    let mut relay_acquiring = vec![false; n];
     let mut isl_used: HashMap<(usize, usize), f64> = HashMap::new();
 
     let mut result = RoutingResult {
@@ -129,11 +226,19 @@ pub fn route_network(
         isl_links: Vec::new(),
         sat_ground_rate: vec![0.0; n],
         sat_carried_rate: vec![0.0; n],
+        events: Vec::new(),
     };
 
-    // --- Phase A: point each relay's SGL terminal at its best station ---
-    // The relay's own traffic is NOT allocated yet: forwarded LEO traffic gets
-    // priority on the shared SGL pipe, and the relay fills what is left (Phase D).
+    // --- Link memory upkeep: drop vanished satellites, advance acquisitions ---
+    {
+        let ids: std::collections::HashSet<&str> = nodes.iter().map(|s| s.id.as_str()).collect();
+        memory.links.retain(|id, _| ids.contains(id.as_str()));
+        for st in memory.links.values_mut() {
+            st.acquiring = (st.acquiring - dt).max(0.0);
+        }
+    }
+
+    // --- Phase A: point each relay's SGL terminal, with hysteresis ---
     for i in 0..n {
         if !nodes[i].is_relay {
             continue;
@@ -150,11 +255,35 @@ pub fn route_network(
                 best_score = score;
             }
         }
-        if best_j == usize::MAX {
+
+        // Hysteresis: keep the current station while it works well enough.
+        let mut chosen_j = best_j;
+        let mut chosen_link = best_link;
+        if let Some(LinkState { target: LinkTarget::Ground(gs_id), .. }) = memory.links.get(&nodes[i].id) {
+            if let Some(cur_j) = gs.iter().position(|g| &g.id == gs_id) {
+                let cur_cap = sgl_capacity(&nodes[i], &gs[cur_j], env);
+                let cur_score = cur_cap.min(gs_residual[cur_j]);
+                if cur_cap > 0.0 && best_score <= params.hysteresis * cur_score {
+                    chosen_j = cur_j;
+                    chosen_link = cur_cap;
+                }
+            }
+        }
+
+        if chosen_j == usize::MAX {
+            memory.links.remove(&nodes[i].id);
             continue;
         }
-        relay_gs[i] = best_j;
-        sgl_exit_residual[i] = best_link;
+        let acquiring = update_link_state(
+            memory,
+            &mut result.events,
+            &nodes[i].id,
+            LinkTarget::Ground(gs[chosen_j].id.clone()),
+            params.acquisition_time_s,
+        );
+        relay_gs[i] = chosen_j;
+        relay_acquiring[i] = acquiring > 0.0;
+        sgl_exit_residual[i] = if acquiring > 0.0 { 0.0 } else { chosen_link };
     }
 
     // --- Phase B: relay-relay backbone (display capacity) ---
@@ -194,20 +323,7 @@ pub fn route_network(
     });
 
     for &i in &leo_order {
-        // Direct option on residual station capacity.
-        let mut direct_j = usize::MAX;
-        let mut direct_val = 0.0_f64;
-        if !prioritize_relay {
-            for j in 0..m {
-                let cap = sgl_capacity(&nodes[i], &gs[j], env).min(gs_residual[j]);
-                if cap > direct_val {
-                    direct_val = cap;
-                    direct_j = j;
-                }
-            }
-        }
-
-        // Relay option: residual widest path with path tracking.
+        // Residual widest path with path tracking over the relay graph.
         // reach[b] = best bottleneck from relay b to the ground on current residuals.
         let mut reach = vec![0.0_f64; n];
         let mut next_hop = vec![usize::MAX; n];
@@ -218,7 +334,6 @@ pub fn route_network(
                     .min(relay_residual[b]);
             }
         }
-        // Bellman-Ford-style relaxation over relay-relay hops.
         for _ in 0..=n {
             let mut changed = false;
             for a in 0..n {
@@ -244,57 +359,129 @@ pub fn route_network(
                 break;
             }
         }
-        // First hop from the LEO into the relay graph.
-        let mut relay_val = 0.0_f64;
-        let mut first_hop = usize::MAX;
-        for b in 0..n {
+
+        // Value of a candidate first hop for this LEO.
+        let leo_isl_value = |b: usize, isl_used: &HashMap<(usize, usize), f64>, reach: &[f64]| -> f64 {
             if !nodes[b].is_relay || reach[b] <= 0.0 {
-                continue;
+                return 0.0;
             }
             let key = (i.min(b), i.max(b));
             let residual_isl =
                 isl_capacity(nodes, i, b, env) - isl_used.get(&key).copied().unwrap_or(0.0);
-            let via = nodes[i].max_cap.min(residual_isl).min(reach[b]);
+            nodes[i].max_cap.min(residual_isl).min(reach[b])
+        };
+
+        // Best alternatives on current residuals.
+        let mut direct_j = usize::MAX;
+        let mut direct_val = 0.0_f64;
+        if !params.prioritize_relay {
+            for j in 0..m {
+                let cap = sgl_capacity(&nodes[i], &gs[j], env).min(gs_residual[j]);
+                if cap > direct_val {
+                    direct_val = cap;
+                    direct_j = j;
+                }
+            }
+        }
+        let mut relay_val = 0.0_f64;
+        let mut first_hop = usize::MAX;
+        for b in 0..n {
+            let via = leo_isl_value(b, &isl_used, &reach);
             if via > relay_val + 1e-9 {
                 relay_val = via;
                 first_hop = b;
             }
         }
+        let best_alt_val = direct_val.max(relay_val);
 
-        // One laser terminal per LEO: pick the better of the two options.
-        if relay_val > direct_val && first_hop != usize::MAX {
-            let alloc = relay_val;
-            if alloc <= 0.0 {
-                continue;
-            }
-            // Walk the relay chain, consuming residuals hop by hop.
-            *isl_used.entry((i.min(first_hop), i.max(first_hop))).or_insert(0.0) += alloc;
-            result.isl_links.push((i, first_hop, alloc));
-            let mut b = first_hop;
-            loop {
-                relay_residual[b] -= alloc;
-                let nb = next_hop[b];
-                if nb == usize::MAX {
-                    // Exit relay: consume its SGL headroom and the station residual.
-                    let j = relay_gs[b];
-                    sgl_exit_residual[b] -= alloc;
-                    exit_flow[b] += alloc;
-                    gs_residual[j] -= alloc;
-                    result.gs_throughputs[j] += alloc;
-                    break;
+        // Incumbent link value under the same residuals.
+        let mut incumbent: Option<(LinkTarget, f64, usize)> = None; // (target, value, idx)
+        if let Some(st) = memory.links.get(&nodes[i].id) {
+            match &st.target {
+                LinkTarget::Ground(gs_id) if !params.prioritize_relay => {
+                    if let Some(j) = gs.iter().position(|g| &g.id == gs_id) {
+                        let v = sgl_capacity(&nodes[i], &gs[j], env).min(gs_residual[j]);
+                        if v > 0.0 {
+                            incumbent = Some((st.target.clone(), v, j));
+                        }
+                    }
                 }
-                *isl_used.entry((b.min(nb), b.max(nb))).or_insert(0.0) += alloc;
-                b = nb;
+                LinkTarget::Sat(sat_id) => {
+                    if let Some(b) = nodes.iter().position(|s| &s.id == sat_id) {
+                        let v = leo_isl_value(b, &isl_used, &reach);
+                        if v > 0.0 {
+                            incumbent = Some((st.target.clone(), v, b));
+                        }
+                    }
+                }
+                _ => {}
             }
-            result.total_throughput += alloc;
-            result.sat_ground_rate[i] = alloc;
-        } else if direct_j != usize::MAX && direct_val > 0.0 {
-            let alloc = direct_val;
-            gs_residual[direct_j] -= alloc;
-            result.gs_throughputs[direct_j] += alloc;
-            result.total_throughput += alloc;
-            result.sat_ground_rate[i] = alloc;
-            result.sgl_links.push((i, direct_j, alloc));
+        }
+
+        // Hysteresis decision: keep the incumbent unless the alternative is
+        // decisively better (or the incumbent is gone).
+        let (target, value, idx) = match incumbent {
+            Some((t, v, idx)) if best_alt_val <= params.hysteresis * v => (t, v, idx),
+            _ => {
+                if relay_val > direct_val && first_hop != usize::MAX {
+                    (LinkTarget::Sat(nodes[first_hop].id.clone()), relay_val, first_hop)
+                } else if direct_j != usize::MAX && direct_val > 0.0 {
+                    (LinkTarget::Ground(gs[direct_j].id.clone()), direct_val, direct_j)
+                } else {
+                    memory.links.remove(&nodes[i].id);
+                    continue;
+                }
+            }
+        };
+
+        let acquiring = update_link_state(
+            memory,
+            &mut result.events,
+            &nodes[i].id,
+            target.clone(),
+            params.acquisition_time_s,
+        );
+        if acquiring > 0.0 {
+            // Terminal busy pointing: link visible on the map, no traffic yet.
+            match target {
+                LinkTarget::Ground(_) => result.sgl_links.push((i, idx, 0.0)),
+                LinkTarget::Sat(_) => result.isl_links.push((i, idx, 0.0)),
+            }
+            continue;
+        }
+
+        match target {
+            LinkTarget::Ground(_) => {
+                gs_residual[idx] -= value;
+                result.gs_throughputs[idx] += value;
+                result.total_throughput += value;
+                result.sat_ground_rate[i] = value;
+                result.sgl_links.push((i, idx, value));
+            }
+            LinkTarget::Sat(_) => {
+                // Walk the relay chain, consuming residuals hop by hop.
+                let alloc = value;
+                *isl_used.entry((i.min(idx), i.max(idx))).or_insert(0.0) += alloc;
+                result.isl_links.push((i, idx, alloc));
+                let mut b = idx;
+                loop {
+                    relay_residual[b] -= alloc;
+                    let nb = next_hop[b];
+                    if nb == usize::MAX {
+                        // Exit relay: consume its SGL headroom and the station residual.
+                        let j = relay_gs[b];
+                        sgl_exit_residual[b] -= alloc;
+                        exit_flow[b] += alloc;
+                        gs_residual[j] -= alloc;
+                        result.gs_throughputs[j] += alloc;
+                        break;
+                    }
+                    *isl_used.entry((b.min(nb), b.max(nb))).or_insert(0.0) += alloc;
+                    b = nb;
+                }
+                result.total_throughput += alloc;
+                result.sat_ground_rate[i] = alloc;
+            }
         }
     }
 
@@ -317,8 +504,9 @@ pub fn route_network(
         }
         // The SGL entry carries the relay's own traffic plus everything it
         // forwarded for other satellites (they share the same physical beam).
+        // A zero-capacity entry marks a link still in acquisition.
         let link_total = alloc + exit_flow[i];
-        if link_total > 0.0 {
+        if link_total > 0.0 || relay_acquiring[i] {
             result.sgl_links.push((i, j, link_total));
         }
     }
@@ -461,6 +649,7 @@ mod tests {
 
     fn node(r: [f64; 3], is_relay: bool, max_cap: f64) -> RouteNode {
         RouteNode {
+            id: String::new(), // assigned per-index by route()
             is_relay,
             max_cap,
             // Reference distances comparable to the test geometries, so the
@@ -473,7 +662,29 @@ mod tests {
     }
 
     fn gs_at_x(capacity: f64) -> GroundNode {
-        GroundNode { r: [R_EARTH, 0.0, 0.0], k_value: 0.0, capacity, min_elev_rad: 0.0 }
+        GroundNode { id: String::new(), r: [R_EARTH, 0.0, 0.0], k_value: 0.0, capacity, min_elev_rad: 0.0 }
+    }
+
+    fn params(prioritize_relay: bool) -> RouteParams {
+        RouteParams { prioritize_relay, hysteresis: 1.3, acquisition_time_s: 0.0 }
+    }
+
+    /// One-shot routing pass with fresh memory and zero acquisition time:
+    /// equivalent to the pre-hysteresis behavior. Assigns unique ids.
+    fn route(
+        mut nodes: Vec<RouteNode>,
+        mut gs: Vec<GroundNode>,
+        prioritize_relay: bool,
+        env: &SimEnvironment,
+    ) -> RoutingResult {
+        for (k, n) in nodes.iter_mut().enumerate() {
+            n.id = format!("S{k}");
+        }
+        for (k, g) in gs.iter_mut().enumerate() {
+            g.id = format!("G{k}");
+        }
+        let mut memory = LinkMemory::new();
+        route_network(&nodes, &gs, &params(prioritize_relay), &mut memory, 0.0, env)
     }
 
     #[test]
@@ -499,14 +710,14 @@ mod tests {
         // Satellite ~8.5° above the station's horizon: geometrically visible
         // but below the 10° mask.
         let low_sat = node([R_EARTH + 300_000.0, 2_000_000.0, 0.0], false, 40.0);
-        let res = route_network(&[low_sat], &[gs], false, &env);
+        let res = route(vec![low_sat], vec![gs], false, &env);
         assert_eq!(res.sat_ground_rate[0], 0.0, "link below the elevation mask must be unusable");
 
         // Same satellite straight overhead: well above the mask.
         let mut gs = gs_at_x(f64::INFINITY);
         gs.min_elev_rad = 10.0_f64.to_radians();
         let high_sat = node([R_EARTH + 300_000.0, 0.0, 0.0], false, 40.0);
-        let res = route_network(&[high_sat], &[gs], false, &env);
+        let res = route(vec![high_sat], vec![gs], false, &env);
         assert!(res.sat_ground_rate[0] > 0.0, "overhead link must pass the mask");
     }
 
@@ -519,7 +730,7 @@ mod tests {
             node([R_EARTH + 560_000.0, 10_000.0, 0.0], false, 8.0),
         ];
         let gs = vec![gs_at_x(10.0)];
-        let res = route_network(&nodes, &gs, false, &env);
+        let res = route(nodes, gs, false, &env);
         assert!(res.gs_throughputs[0] <= 10.0 + 1e-9, "gs throughput = {}", res.gs_throughputs[0]);
         // Both should still get something: the second LEO takes the leftover.
         assert!(res.sat_ground_rate.iter().filter(|&&r| r > 0.0).count() == 2);
@@ -538,7 +749,7 @@ mod tests {
             node([R_EARTH + 10_000_000.0, 0.0, 0.0], true, 20.0),
         ];
         let gs = vec![gs_at_x(f64::INFINITY)];
-        let res = route_network(&nodes, &gs, true, &env);
+        let res = route(nodes, gs, true, &env);
         let forwarded: f64 = res.sat_ground_rate[..3].iter().sum();
         // The relay's own downlink plus everything it forwards must fit its 20 Gbps payload.
         let relay_total = forwarded + res.sat_ground_rate[3];
@@ -561,7 +772,7 @@ mod tests {
             node([r_geo * 0.7, r_geo * 0.7, 0.0], true, 25.0),
         ];
         let gs = vec![gs_at_x(f64::INFINITY)];
-        let res = route_network(&nodes, &gs, true, &env);
+        let res = route(nodes, gs, true, &env);
         assert!(res.sat_ground_rate[0] > 0.0, "LEO could not reach the ground through the chain");
         // The chain bottleneck can never exceed any relay payload on the path.
         assert!(res.sat_ground_rate[0] <= 25.0 + 1e-9);
@@ -570,13 +781,117 @@ mod tests {
     #[test]
     fn pointing_loss_halves_link_capacity() {
         let env = test_env();
-        let gs = vec![gs_at_x(f64::INFINITY)];
-        let mut nodes = vec![node([R_EARTH + 1_000_000.0, 0.0, 0.0], false, 40.0)];
-        let full = route_network(&nodes, &gs, false, &env).sat_ground_rate[0];
+        let full = route(
+            vec![node([R_EARTH + 1_000_000.0, 0.0, 0.0], false, 40.0)],
+            vec![gs_at_x(f64::INFINITY)],
+            false,
+            &env,
+        )
+        .sat_ground_rate[0];
         assert!(full > 0.0);
-        nodes[0].point_factor = 0.5;
-        let half = route_network(&nodes, &gs, false, &env).sat_ground_rate[0];
+        let mut degraded_node = node([R_EARTH + 1_000_000.0, 0.0, 0.0], false, 40.0);
+        degraded_node.point_factor = 0.5;
+        let half = route(vec![degraded_node], vec![gs_at_x(f64::INFINITY)], false, &env)
+            .sat_ground_rate[0];
         assert!((half - full * 0.5).abs() < 1e-9, "full {full}, degraded {half}");
+    }
+
+    #[test]
+    fn hysteresis_keeps_current_link_until_decisively_beaten() {
+        let env = test_env();
+        let p = params(false);
+        let mut memory = LinkMemory::new();
+        // Two stations 20° apart along the satellite's ground track. With a
+        // 500 km reference distance the link capacity is distance-sensitive,
+        // so moving along the arc shifts the balance between GA and GB.
+        let gs_angle_b = 20.0_f64.to_radians();
+        let mk_gs = || {
+            vec![
+                GroundNode { id: "GA".into(), r: [R_EARTH, 0.0, 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 },
+                GroundNode { id: "GB".into(), r: [R_EARTH * gs_angle_b.cos(), R_EARTH * gs_angle_b.sin(), 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 },
+            ]
+        };
+        let mk_sat = |arc_deg: f64| {
+            let a = arc_deg.to_radians();
+            let r_orb = R_EARTH + 800_000.0;
+            let mut s = node([r_orb * a.cos(), r_orb * a.sin(), 0.0], false, 40.0);
+            s.id = "LEO".into();
+            s.sgl_ref_dist = 500.0;
+            s
+        };
+
+        // Pass 1: overhead of GA → links GA.
+        let res = route_network(&[mk_sat(0.0)], &mk_gs(), &p, &mut memory, 0.0, &env);
+        assert_eq!(res.sgl_links[0].1, 0, "should link GA first");
+
+        // Pass 2: slightly past the midpoint toward GB — GB is better, but by
+        // less than the 30% hysteresis margin → stays on GA, no handover.
+        let res = route_network(&[mk_sat(10.8)], &mk_gs(), &p, &mut memory, 10.0, &env);
+        assert_eq!(res.sgl_links[0].1, 0, "hysteresis must keep GA");
+        assert!(res.events.is_empty(), "no handover expected: {:?}", res.events);
+
+        // Pass 3: overhead of GB → decisively better → handover.
+        let res = route_network(&[mk_sat(20.0)], &mk_gs(), &p, &mut memory, 10.0, &env);
+        assert_eq!(res.sgl_links[0].1, 1, "should hand over to GB");
+        assert!(res.events.iter().any(|e| e.contains("handover")), "{:?}", res.events);
+    }
+
+    #[test]
+    fn acquisition_delay_blocks_traffic_then_releases() {
+        let env = test_env();
+        let p = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 30.0 };
+        let mut memory = LinkMemory::new();
+        let mk_sat = || {
+            let mut s = node([R_EARTH + 800_000.0, 0.0, 0.0], false, 40.0);
+            s.id = "LEO".into();
+            s
+        };
+        let mk_gs = || vec![GroundNode { id: "GA".into(), r: [R_EARTH, 0.0, 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 }];
+
+        // First contact: link created, still acquiring → no traffic.
+        let res = route_network(&[mk_sat()], &mk_gs(), &p, &mut memory, 0.0, &env);
+        assert_eq!(res.sat_ground_rate[0], 0.0);
+        assert_eq!(res.sgl_links[0].2, 0.0, "acquiring link must be reported at 0");
+        assert!(res.events.iter().any(|e| e.contains("acquiring")));
+
+        // 20 s later: still acquiring.
+        let res = route_network(&[mk_sat()], &mk_gs(), &p, &mut memory, 20.0, &env);
+        assert_eq!(res.sat_ground_rate[0], 0.0);
+
+        // Another 20 s: acquisition complete, traffic flows.
+        let res = route_network(&[mk_sat()], &mk_gs(), &p, &mut memory, 20.0, &env);
+        assert!(res.sat_ground_rate[0] > 0.0, "link must carry traffic after acquisition");
+    }
+
+    #[test]
+    fn handover_on_link_loss_requires_reacquisition() {
+        let env = test_env();
+        let p = RouteParams { prioritize_relay: false, hysteresis: 1.3, acquisition_time_s: 10.0 };
+        let mut memory = LinkMemory::new();
+        let mk_gs = |ga_visible: bool| {
+            let ga_r = if ga_visible { [R_EARTH, 0.0, 0.0] } else { [-R_EARTH, 0.0, 0.0] };
+            vec![
+                GroundNode { id: "GA".into(), r: ga_r, k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 },
+                GroundNode { id: "GB".into(), r: [R_EARTH * 0.9, R_EARTH * 0.436, 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 },
+            ]
+        };
+        let mk_sat = || {
+            let mut s = node([R_EARTH + 800_000.0, 0.0, 0.0], false, 40.0);
+            s.id = "LEO".into();
+            s
+        };
+
+        // Establish and complete acquisition on GA.
+        route_network(&[mk_sat()], &mk_gs(true), &p, &mut memory, 0.0, &env);
+        let res = route_network(&[mk_sat()], &mk_gs(true), &p, &mut memory, 15.0, &env);
+        assert!(res.sat_ground_rate[0] > 0.0);
+        assert_eq!(res.sgl_links[0].1, 0);
+
+        // GA disappears behind the planet: forced handover to GB, re-acquiring.
+        let res = route_network(&[mk_sat()], &mk_gs(false), &p, &mut memory, 15.0, &env);
+        assert_eq!(res.sgl_links[0].1, 1, "must fail over to GB");
+        assert_eq!(res.sgl_links[0].2, 0.0, "failover link must re-acquire");
+        assert!(res.events.iter().any(|e| e.contains("handover")));
     }
 
     #[test]
@@ -590,7 +905,7 @@ mod tests {
             node([R_EARTH + 10_000_000.0, -3_000_000.0, 0.0], true, 50.0),
         ];
         let gs = vec![gs_at_x(f64::INFINITY)];
-        let res = route_network(&nodes, &gs, true, &env);
+        let res = route(nodes, gs, true, &env);
         // Flow must traverse the 50 Gbps relay: its residual consumption shows up
         // as the LEO's first hop in isl_links.
         let leo_hop = res.isl_links.iter().find(|(a, b, _)| *a == 0 || *b == 0);

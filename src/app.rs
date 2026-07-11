@@ -81,6 +81,11 @@ pub struct HydronGuiApp {
     // Snapshot ring buffer backing the negative time warp (rewind)
     rewind: crate::rewind::RewindBuffer,
 
+    // Persistent laser link state (hysteresis + acquisition timers)
+    link_memory: LinkMemory,
+    // Simulation epoch of the previous routing pass, to drive acquisition countdowns
+    last_routed_time: f64,
+
     // Filter displays
     show_leo: bool,
     show_meo: bool,
@@ -209,6 +214,8 @@ impl HydronGuiApp {
             weather_overrides: vec![Some(0); ground_stations.len()],
             gs_saturated: std::collections::HashSet::new(),
             rewind: crate::rewind::RewindBuffer::new(),
+            link_memory: LinkMemory::new(),
+            last_routed_time: 0.0,
             active_tab: RibbonTab::Simulation,
             show_telemetry_hud: true,
             show_logs_hud: true,
@@ -365,6 +372,12 @@ impl HydronGuiApp {
 
         let noise = self.adcs_noise();
         let mut rng = Lcg::new(99);
+        let export_params = RouteParams {
+            prioritize_relay: self.prioritize_relay,
+            hysteresis: self.config.handover_hysteresis,
+            acquisition_time_s: self.config.acquisition_time_s,
+        };
+        let mut export_memory = LinkMemory::new();
 
         while current_time <= sim_duration {
             // 1. Step atmosphere
@@ -409,9 +422,9 @@ impl HydronGuiApp {
             // Shared routing pass (same allocation model as the live view)
             let (route_nodes, _pointing) = self.build_route_nodes(&constellation);
             let gs_nodes: Vec<GroundNode> = gs_eci_list.iter().zip(ground_stations.iter())
-                .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps, min_elev_rad: self.config.min_elevation_deg.to_radians() })
+                .map(|(r, gs)| GroundNode { id: gs.id.clone(), r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps, min_elev_rad: self.config.min_elevation_deg.to_radians() })
                 .collect();
-            let routing = route_network(&route_nodes, &gs_nodes, self.prioritize_relay, &self.config.env);
+            let routing = route_network(&route_nodes, &gs_nodes, &export_params, &mut export_memory, step_size, &self.config.env);
 
             let gs_throughputs = routing.gs_throughputs;
             let total_throughput = routing.total_throughput;
@@ -454,6 +467,7 @@ impl HydronGuiApp {
                 let point_factor = pointing_loss_factor(err, ref_rad);
                 pointing.insert(sat.id.clone(), (err, point_factor));
                 nodes.push(RouteNode {
+                    id: sat.id.clone(),
                     is_relay,
                     max_cap,
                     sgl_ref_dist,
@@ -585,6 +599,8 @@ impl HydronGuiApp {
                 };
                 self.rewind.clear();
                 self.rewind.record(0.0, &self.constellation, &self.ground_stations, &self.atmos_model.lcg, &self.sensor_rng);
+                self.link_memory.clear();
+                self.last_routed_time = 0.0;
                 self.log(&format!("Configurazione importata correttamente da {}", source_name));
                 Ok(())
             }
@@ -704,6 +720,8 @@ impl HydronGuiApp {
         toml.push_str(&format!("ref_distance_sgl_km = {:.1}\n", c.ref_dist_sgl_km));
         toml.push_str(&format!("pointing_ref_mrad = {:.2}\n", c.pointing_ref_mrad));
         toml.push_str(&format!("min_elevation_deg = {:.1}\n", c.min_elevation_deg));
+        toml.push_str(&format!("handover_hysteresis = {:.2}\n", c.handover_hysteresis));
+        toml.push_str(&format!("acquisition_time_s = {:.1}\n", c.acquisition_time_s));
 
         toml
     }
@@ -959,6 +977,8 @@ impl eframe::App for HydronGuiApp {
                     }
                 }
             }
+            // Link state cannot be rewound: terminals re-acquire after a rewind.
+            self.link_memory.clear();
             if exhausted {
                 self.time_warp = 0;
                 self.log("Rewind buffer esaurito: raggiunto lo stato più vecchio registrato");
@@ -1002,9 +1022,21 @@ impl eframe::App for HydronGuiApp {
         // current geometry (shared with the 24h exporter via route_network).
         let (route_nodes, sat_pointing) = self.build_route_nodes(&self.constellation);
         let gs_nodes: Vec<GroundNode> = gs_eci_list.iter().zip(self.ground_stations.iter())
-            .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps, min_elev_rad: self.config.min_elevation_deg.to_radians() })
+            .map(|(r, gs)| GroundNode { id: gs.id.clone(), r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps, min_elev_rad: self.config.min_elevation_deg.to_radians() })
             .collect();
-        let routing = route_network(&route_nodes, &gs_nodes, self.prioritize_relay, &self.config.env);
+        let route_params = RouteParams {
+            prioritize_relay: self.prioritize_relay,
+            hysteresis: self.config.handover_hysteresis,
+            acquisition_time_s: self.config.acquisition_time_s,
+        };
+        // Simulated seconds since the previous pass drive the acquisition timers.
+        let route_dt = (self.current_time - self.last_routed_time).max(0.0);
+        self.last_routed_time = self.current_time;
+        let routing = route_network(&route_nodes, &gs_nodes, &route_params, &mut self.link_memory, route_dt, &self.config.env);
+        for event in &routing.events {
+            let msg = event.clone();
+            self.log(&msg);
+        }
 
         let mut connected_sats_per_gs: Vec<Vec<(String, &str, f64, f64)>> = vec![Vec::new(); self.ground_stations.len()];
         let gs_throughputs: Vec<f32> = routing.gs_throughputs.iter().map(|v| *v as f32).collect();
@@ -2703,7 +2735,7 @@ impl eframe::App for HydronGuiApp {
                     let Some(&(gs_idx, alloc)) = sat_sgl_draw.get(sat_id) else {
                         continue;
                     };
-                    if gs_idx >= stations_screen.len() || alloc <= 0.0 {
+                    if gs_idx >= stations_screen.len() {
                         continue;
                     }
                     let sat_max_speed = match _type {
@@ -3001,6 +3033,8 @@ impl eframe::App for HydronGuiApp {
             self.geo_max_bitrate = 800.0;
             self.rewind.clear();
             self.rewind.record(0.0, &self.constellation, &self.ground_stations, &self.atmos_model.lcg, &self.sensor_rng);
+            self.link_memory.clear();
+            self.last_routed_time = 0.0;
             self.log("Simulation State Reset to initial values");
         }
     }
@@ -3060,6 +3094,8 @@ pub fn default_config() -> Config {
         ref_dist_sgl_km: 1000.0,
         pointing_ref_mrad: 5.0,
         min_elevation_deg: 5.0,
+        handover_hysteresis: 1.3,
+        acquisition_time_s: 20.0,
         adcs: AdcsConfig::default(),
     }
 }
