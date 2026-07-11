@@ -364,7 +364,6 @@ impl HydronGuiApp {
         let mut current_time = 0.0;
 
         let sun_vector = [1.0, 0.0, 0.0];
-        let b_eci_mock = [1e-5, 2e-5, -3e-5];
         let noise = self.adcs_noise();
         let mut rng = Lcg::new(99);
 
@@ -380,14 +379,16 @@ impl HydronGuiApp {
             }
 
             // 2. Step satellite dynamics with the closed-loop ADCS controller
+            let gst_now = current_time * 7.292115e-5;
             for segment in &mut constellation.segments {
                 for sat in &mut segment.satellites {
+                    let b_eci = dipole_field_eci(sat.r, gst_now, self.config.env.r_earth);
                     let q_target = nadir_target_quaternion(sat.r, sat.v);
-                    let b_body = rotate_vector_q(sat.q, b_eci_mock);
+                    let b_body = rotate_vector_q(sat.q, b_eci);
                     let (rw_torque, mtq_dipole) =
                         compute_adcs_command(sat, q_target, b_body, &self.adcs_gains, &noise, &mut rng);
                     step_orbit(sat, step_size, &self.config.env, sun_vector);
-                    step_attitude(sat, step_size, b_eci_mock, rw_torque, mtq_dipole, [0.0; 3]);
+                    step_attitude(sat, step_size, b_eci, rw_torque, mtq_dipole, [0.0; 3]);
                 }
             }
 
@@ -882,7 +883,7 @@ impl eframe::App for HydronGuiApp {
             for _ in 0..loops {
                 self.current_time += dt;
                 let sun_vector = [1.0, 0.0, 0.0];
-                let b_eci_mock = [1e-5, 2e-5, -3e-5];
+                let gst_now = self.current_time * 7.292115e-5;
 
                 // Step atmosphere
                 for (idx, gs) in &mut self.ground_stations.iter_mut().enumerate() {
@@ -908,8 +909,9 @@ impl eframe::App for HydronGuiApp {
                 let noise = self.adcs_noise();
                 for segment in &mut self.constellation.segments {
                     for sat in &mut segment.satellites {
+                        let b_eci = dipole_field_eci(sat.r, gst_now, self.config.env.r_earth);
                         let q_target = nadir_target_quaternion(sat.r, sat.v);
-                        let b_body = rotate_vector_q(sat.q, b_eci_mock);
+                        let b_body = rotate_vector_q(sat.q, b_eci);
                         let (rw_torque, mtq_dipole) =
                             compute_adcs_command(sat, q_target, b_body, &gains, &noise, &mut self.sensor_rng);
 
@@ -922,7 +924,7 @@ impl eframe::App for HydronGuiApp {
                         }
 
                         step_orbit(sat, dt, &self.config.env, sun_vector);
-                        step_attitude(sat, dt, b_eci_mock, rw_torque, mtq_dipole, tau_ext);
+                        step_attitude(sat, dt, b_eci, rw_torque, mtq_dipole, tau_ext);
                     }
                 }
 
@@ -1130,7 +1132,7 @@ impl eframe::App for HydronGuiApp {
                                         self.is_running = false;
                                         self.current_time += self.step_size;
                                         let sun_vector = [1.0, 0.0, 0.0];
-                                        let b_eci_mock = [1e-5, 2e-5, -3e-5];
+                                        let gst_now = self.current_time * 7.292115e-5;
                                         for gs in &mut self.ground_stations {
                                             step_atmosphere(gs, &mut self.atmos_model);
                                         }
@@ -1139,12 +1141,13 @@ impl eframe::App for HydronGuiApp {
                                         let step_size = self.step_size;
                                         for segment in &mut self.constellation.segments {
                                             for sat in &mut segment.satellites {
+                                                let b_eci = dipole_field_eci(sat.r, gst_now, self.config.env.r_earth);
                                                 let q_target = nadir_target_quaternion(sat.r, sat.v);
-                                                let b_body = rotate_vector_q(sat.q, b_eci_mock);
+                                                let b_body = rotate_vector_q(sat.q, b_eci);
                                                 let (rw_torque, mtq_dipole) =
                                                     compute_adcs_command(sat, q_target, b_body, &gains, &noise, &mut self.sensor_rng);
                                                 step_orbit(sat, step_size, &self.config.env, sun_vector);
-                                                step_attitude(sat, step_size, b_eci_mock, rw_torque, mtq_dipole, [0.0; 3]);
+                                                step_attitude(sat, step_size, b_eci, rw_torque, mtq_dipole, [0.0; 3]);
                                             }
                                         }
                                         self.rewind.record(

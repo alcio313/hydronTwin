@@ -85,6 +85,34 @@ pub fn step_orbit(sat: &mut Satellite, dt: f64, env: &SimEnvironment, sun_vector
     sat.v = [state[3], state[4], state[5]];
 }
 
+/// Earth magnetic field as a tilted dipole, in ECI coordinates (Tesla).
+///
+/// B(r) = B0 (Re/r)^3 [3 (m·r̂) r̂ − m], with the dipole axis tilted ~11.5°
+/// from the rotation axis and co-rotating with the Earth (via GST). Replaces
+/// the previous constant mock field so magnetorquer authority varies with
+/// position and altitude (B ~ 1/r^3: strong in LEO, weak at GEO).
+pub fn dipole_field_eci(r_eci: [f64; 3], gst: f64, r_earth: f64) -> [f64; 3] {
+    const B0: f64 = 3.12e-5; // Mean field at the magnetic equator, Earth surface (T)
+    const TILT_RAD: f64 = 11.5 * std::f64::consts::PI / 180.0;
+    // Dipole axis: tilted from +z toward a longitude fixed in the rotating Earth
+    // (the geographic longitude of the north magnetic pole is folded into GST=0).
+    let (sin_t, cos_t) = TILT_RAD.sin_cos();
+    let m_hat = [sin_t * gst.cos(), sin_t * gst.sin(), cos_t];
+
+    let r_len = norm(r_eci);
+    if r_len <= 0.0 {
+        return [0.0; 3];
+    }
+    let r_hat = scale(r_eci, 1.0 / r_len);
+    let m_dot_r = dot(m_hat, r_hat);
+    let factor = B0 * (r_earth / r_len).powi(3);
+    [
+        factor * (3.0 * m_dot_r * r_hat[0] - m_hat[0]),
+        factor * (3.0 * m_dot_r * r_hat[1] - m_hat[1]),
+        factor * (3.0 * m_dot_r * r_hat[2] - m_hat[2]),
+    ]
+}
+
 // 2. step_attitude: Propagates the spacecraft attitude dynamics using quaternion kinematic integration
 // and Euler's equations of rotational motion with reaction wheels, magnetorquers, and disturbances.
 // `tau_ext` is an externally injected body-frame disturbance torque (Nm).
@@ -237,6 +265,38 @@ mod tests {
             "radius drifted by {} m over one period",
             (r_final - r0).abs()
         );
+    }
+
+    #[test]
+    fn dipole_field_magnitude_and_direction() {
+        let r_earth = 6378137.0;
+        // Zero tilt reference: evaluate with GST=0 and points on the geographic
+        // axes, then compare against the analytic dipole with 11.5° tilt.
+        let tilt = 11.5_f64.to_radians();
+        let m_hat = [tilt.sin(), 0.0, tilt.cos()];
+
+        // On the dipole axis at 2 Earth radii: |B| = 2*B0/8 = B0/4.
+        let r_axis = [2.0 * r_earth * m_hat[0], 2.0 * r_earth * m_hat[1], 2.0 * r_earth * m_hat[2]];
+        let b = dipole_field_eci(r_axis, 0.0, r_earth);
+        let b_mag = norm(b);
+        assert!((b_mag - 2.0 * 3.12e-5 / 8.0).abs() / b_mag < 1e-9, "|B| on axis = {b_mag}");
+        // Field parallel to the dipole axis there.
+        let cos_angle = crate::math::dot(crate::math::normalize(b), m_hat);
+        assert!((cos_angle - 1.0).abs() < 1e-9);
+
+        // On the magnetic equator (perpendicular to m) at surface radius: |B| = B0,
+        // anti-parallel to m.
+        let e = crate::math::normalize(crate::math::cross(m_hat, [0.0, 1.0, 0.0]));
+        let r_eq = [r_earth * e[0], r_earth * e[1], r_earth * e[2]];
+        let b_eq = dipole_field_eci(r_eq, 0.0, r_earth);
+        assert!((norm(b_eq) - 3.12e-5).abs() / 3.12e-5 < 1e-9);
+        let cos_eq = crate::math::dot(crate::math::normalize(b_eq), m_hat);
+        assert!((cos_eq + 1.0).abs() < 1e-9);
+
+        // 1/r^3 decay: GEO field ~ (Re/r_geo)^3 weaker than surface field.
+        let r_geo = 42164e3;
+        let b_geo = dipole_field_eci([0.0, r_geo, 0.0], 0.0, r_earth);
+        assert!(norm(b_geo) < 3.0e-7, "GEO field should be ~1e-7 T, got {}", norm(b_geo));
     }
 
     #[test]
