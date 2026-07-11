@@ -3,6 +3,7 @@ mod config;
 mod math;
 mod adcs;
 mod physics;
+mod rewind;
 mod simulation;
 mod network;
 mod app;

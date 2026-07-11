@@ -15,6 +15,16 @@ impl Lcg {
         (self.state as f64) / (u64::MAX as f64)
     }
 
+    /// Internal RNG state, for snapshotting (rewind support).
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
+    /// Restore a previously captured RNG state (rewind support).
+    pub fn set_state(&mut self, state: u64) {
+        self.state = state;
+    }
+
     /// Standard normal sample N(0, 1) via Box-Muller.
     pub fn next_gaussian(&mut self) -> f64 {
         // Clamp away from 0 so ln() stays finite.
@@ -218,6 +228,18 @@ mod tests {
         let var = samples.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
         assert!(mean.abs() < 0.05, "mean = {mean}");
         assert!((var - 1.0).abs() < 0.1, "var = {var}");
+    }
+
+    #[test]
+    fn lcg_state_roundtrip() {
+        let mut a = Lcg::new(42);
+        a.next_f64();
+        a.next_f64();
+        let saved = a.state();
+        let expected: Vec<f64> = (0..5).map(|_| a.next_f64()).collect();
+        a.set_state(saved);
+        let replayed: Vec<f64> = (0..5).map(|_| a.next_f64()).collect();
+        assert_eq!(expected, replayed);
     }
 
     #[test]

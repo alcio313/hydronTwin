@@ -78,6 +78,9 @@ pub struct HydronGuiApp {
     // Ground stations currently throttled at their nominal capacity (for log transitions)
     gs_saturated: std::collections::HashSet<String>,
 
+    // Snapshot ring buffer backing the negative time warp (rewind)
+    rewind: crate::rewind::RewindBuffer,
+
     // Filter displays
     show_leo: bool,
     show_meo: bool,
@@ -205,6 +208,7 @@ impl HydronGuiApp {
             
             weather_overrides: vec![Some(0); ground_stations.len()],
             gs_saturated: std::collections::HashSet::new(),
+            rewind: crate::rewind::RewindBuffer::new(),
             active_tab: RibbonTab::Simulation,
             show_telemetry_hud: true,
             show_logs_hud: true,
@@ -284,6 +288,8 @@ impl HydronGuiApp {
             app.log("Warning: embedded earth.jpg could not be decoded.");
         }
         app.update_input_fields_for_selected();
+        // Seed the rewind buffer with the initial state so the user can rewind to t=0
+        app.rewind.record(0.0, &app.constellation, &app.ground_stations, &app.atmos_model.lcg, &app.sensor_rng);
         app
     }
 
@@ -576,6 +582,8 @@ impl HydronGuiApp {
                     k_dump: self.config.adcs.k_dump,
                     h_dump_threshold: self.config.adcs.h_dump_threshold,
                 };
+                self.rewind.clear();
+                self.rewind.record(0.0, &self.constellation, &self.ground_stations, &self.atmos_model.lcg, &self.sensor_rng);
                 self.log(&format!("Configurazione importata correttamente da {}", source_name));
                 Ok(())
             }
@@ -865,16 +873,12 @@ impl eframe::App for HydronGuiApp {
         let mut pending_reset = false;
 
         // 1. Core simulation physics steps
-        if self.is_running {
+        if self.is_running && self.time_warp > 0 {
             let mut pending_logs = Vec::new();
-            let loops = self.time_warp.abs();
-            let dt = if self.time_warp < 0 { -self.step_size } else { self.step_size };
+            let loops = self.time_warp;
+            let dt = self.step_size;
 
             for _ in 0..loops {
-                if self.current_time + dt < 0.0 {
-                    self.current_time = 0.0;
-                    break;
-                }
                 self.current_time += dt;
                 let sun_vector = [1.0, 0.0, 0.0];
                 let b_eci_mock = [1e-5, 2e-5, -3e-5];
@@ -920,9 +924,54 @@ impl eframe::App for HydronGuiApp {
                         step_attitude(sat, dt, b_eci_mock, rw_torque, mtq_dipole, tau_ext);
                     }
                 }
+
+                // Snapshot for rewind support (invalidates itself on structure changes)
+                self.rewind.record(
+                    self.current_time,
+                    &self.constellation,
+                    &self.ground_stations,
+                    &self.atmos_model.lcg,
+                    &self.sensor_rng,
+                );
             }
             for msg in pending_logs {
                 self.log(&msg);
+            }
+        } else if self.is_running && self.time_warp < 0 {
+            // Rewind: restore recorded snapshots instead of integrating the
+            // physics backward (which is unstable and not history-accurate).
+            let loops = self.time_warp.unsigned_abs() as usize;
+            let mut exhausted = false;
+            for _ in 0..loops {
+                match self.rewind.rewind(
+                    &mut self.constellation,
+                    &mut self.ground_stations,
+                    &mut self.atmos_model.lcg,
+                    &mut self.sensor_rng,
+                ) {
+                    Some(t) => self.current_time = t,
+                    None => {
+                        exhausted = true;
+                        break;
+                    }
+                }
+            }
+            if exhausted {
+                self.time_warp = 0;
+                self.log("Rewind buffer esaurito: raggiunto lo stato più vecchio registrato");
+            }
+            // Trim the throughput history back to the restored time so the plot
+            // time axis stays monotonic (the three vectors are aligned).
+            while self
+                .history_time
+                .last()
+                .is_some_and(|&t| t > self.current_time as f32)
+            {
+                self.history_time.pop();
+                for series in &mut self.history_stations {
+                    series.pop();
+                }
+                self.history_total.pop();
             }
         }
 
@@ -1023,8 +1072,8 @@ impl eframe::App for HydronGuiApp {
             self.log(&msg);
         }
 
-        // Update history if running
-        if self.is_running {
+        // Update history if running (forward only: rewind trims it instead)
+        if self.is_running && self.time_warp > 0 {
             self.history_time.push(self.current_time as f32);
             for i in 0..self.ground_stations.len() {
                 self.history_stations[i].push(gs_throughputs[i]);
@@ -1097,6 +1146,13 @@ impl eframe::App for HydronGuiApp {
                                                 step_attitude(sat, step_size, b_eci_mock, rw_torque, mtq_dipole, [0.0; 3]);
                                             }
                                         }
+                                        self.rewind.record(
+                                            self.current_time,
+                                            &self.constellation,
+                                            &self.ground_stations,
+                                            &self.atmos_model.lcg,
+                                            &self.sensor_rng,
+                                        );
                                         self.log("Single Step Executed");
                                     }
                                     if ui.button("↺ Reset").clicked() {
@@ -1113,6 +1169,13 @@ impl eframe::App for HydronGuiApp {
                                     ui.add(egui::Slider::new(&mut self.time_warp, -50..=50).text("x"));
                                     ui.separator();
                                     ui.label(format!("Epoch: {:.1}s", self.current_time));
+                                    if self.time_warp < 0 {
+                                        let buffer_s = self.rewind.len().saturating_sub(1) as f64 * self.step_size;
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(234, 179, 8),
+                                            format!("⏪ Rewind (buffer: {:.0}s)", buffer_s),
+                                        );
+                                    }
                                 });
                             });
                         });
@@ -2932,6 +2995,8 @@ impl eframe::App for HydronGuiApp {
             self.leo_max_bitrate = 100.0;
             self.meo_max_bitrate = 400.0;
             self.geo_max_bitrate = 800.0;
+            self.rewind.clear();
+            self.rewind.record(0.0, &self.constellation, &self.ground_stations, &self.atmos_model.lcg, &self.sensor_rng);
             self.log("Simulation State Reset to initial values");
         }
     }

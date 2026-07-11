@@ -6,6 +6,12 @@
       "runtimeExecutable": "trunk",
       "runtimeArgs": ["serve", "--port", "8080", "--address", "127.0.0.1"],
       "port": 8080
+    },
+    {
+      "name": "hydron-web-release",
+      "runtimeExecutable": "trunk",
+      "runtimeArgs": ["serve", "--release", "--port", "8081", "--address", "127.0.0.1"],
+      "port": 8081
     }
   ]
 }
