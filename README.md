@@ -22,7 +22,8 @@ Developed in Rust using the `egui` immediate-mode GUI framework, this project im
 * **Ground-to-Satellite Links (SGL)**: Simulates atmospheric attenuation on laser links between satellites and ground stations using an exponential atmospheric model and slant-path angles.
 * **Inter-Satellite Links (ISL)**: Simulates laser links between adjacent satellites.
 * **Multi-Hop Relay Routing**: A laser link is active if it reaches the ground — directly (SGL) or by forwarding through a relay. Relay satellites (MEO/GEO) can transmit to *other* relay satellites even when they have no direct ground link, as long as the chain eventually reaches a ground station. There is no longer a requirement that a GEO (or any relay) hold its own direct SGL to participate.
-* **Widest-Path Bottleneck**: Each satellite's usable bitrate to the ground is the *widest path* (the maximum achievable bottleneck) across all possible relay chains. Every hop is capped by the relay's maximum capacity and the inter-satellite link capacity, so the bitrate a LEO can push to ground via the network is limited by the weakest link along its chain. If a relay's ground link degrades (e.g., atmospheric weather), the widest-path selection naturally routes traffic toward a faster path.
+* **Widest-Path Bottleneck with Capacity Accounting**: Each satellite's usable bitrate to the ground is the *widest path* (the maximum achievable bottleneck) across all possible relay chains, computed on **residual capacities**: every allocation consumes the ground station's aggregate downlink capacity, each transited relay's payload capacity, the exit relay's SGL headroom, and the ISL link budget. Ground stations never exceed their configured nominal capacity (saturation is flagged in the HUD and logged), and N terminals sharing a relay split its bandwidth instead of multiplying it. If a relay's ground link degrades (e.g., atmospheric weather) or saturates, the allocation naturally routes traffic toward a faster path.
+* **Pointing-Loss Coupling (ADCS ↔ Network)**: Every laser link is degraded by a Gaussian pointing-loss factor computed from the satellite's real-time ADCS attitude error ($L = e^{-(\theta/\theta_{ref})^2}$, with $\theta_{ref}$ configurable via `pointing_ref_mrad`). Injecting an attitude disturbance visibly crashes the satellite's bitrate until the controller re-stabilizes the bus.
 * **LEO Satellite Laser Terminal Budget**: LEO satellites are restricted to at most 1 active laser connection at any given time (either a single SGL link to ground OR a single ISL link to another satellite).
 * **LEO Connection Path Optimization**: LEO satellites select the fastest overall path to ground — direct SGL or through one or more MEO/GEO relays — via a unified greedy optimization over all SGL and ISL capacities. If *Relay Only* routing is enabled, LEO satellites bypass direct SGL paths and route exclusively via relays.
 * **LEO Capacity Overrides**: Inter-satellite links involving at least one LEO satellite operate at a dynamically configured, stable capacity (bypassing free-space path loss attenuation) to simulate advanced laser terminals.
@@ -38,10 +39,11 @@ Developed in Rust using the `egui` immediate-mode GUI framework, this project im
 * **Time Warp Slider**: Accelerate or decelerate simulation time dynamically (from -50x to +50x).
 * **System Reset**: Restore the simulation and constellations to initial values specified in `config.toml`.
 
-### 4. Noise & Disturbance Injection (ADCS)
-* **Active Attitude Kinematics**: Simulates reaction wheels and magnetorquers stabilizing the satellites.
-* **Disturbance Injector**: Inject a 3-axis torque disturbance vector ($T_x, T_y, T_z$) to observe how the ADCS algorithm stabilizes the satellite bus.
-* **Sensor Noise Configurations**: Configure noise levels for Gyro, Magnetometer, Sun Sensor, and Star Tracker dynamically.
+### 4. Closed-Loop ADCS with Noise & Disturbance Injection
+* **Quaternion-Feedback PD Controller**: Each satellite actively tracks a nadir-pointing LVLH attitude via a PD law on the quaternion error, with per-axis reaction wheel torque saturation and orbit-rate feed-forward.
+* **Magnetorquer Momentum Dumping**: A cross-product desaturation law bleeds reaction wheel momentum through the magnetorquers (threshold-gated so it does not perturb fine pointing), while the wheels feed-forward compensate the dumping torque.
+* **Disturbance Injector**: Inject a 3-axis torque disturbance vector ($T_x, T_y, T_z$) as a real external torque and observe the controller detumble and re-point the bus — and the satellite's laser bitrate collapse and recover through the pointing-loss coupling.
+* **Effective Sensor Noise**: The Gyro, Magnetometer, Sun Sensor, and Star Tracker noise sliders feed the controller's measurements in real time, degrading its pointing performance.
 
 ### 5. 24h CSV Exporter
 * Run a full 24-hour simulation sequence using the current configuration and export the results to a CSV file detailing ground station throughputs, link counts, and overall network data rate.
@@ -123,6 +125,8 @@ The application loads its default parameters from a `config.toml` file in the ro
 * **Ground Stations**: Geographical coordinates (latitude, longitude, altitude) and downlink capacity limits (which can be set to numerical values in Gbps or `"unlimited"`/`"inf"`/`"infinity"` to represent unlimited capacity).
 * **Atmosphere**: Transition matrices for Markov weather state models and laser extinction values.
 * **Environment Constants**: Earth gravity parameters, J2 coefficient, SRP constants, and atmospheric scale heights.
+* **ADCS (`[adcs]`)**: Controller gains (`kp`, `kd`), actuator saturations (`rw_torque_max`, `mtq_dipole_max`), momentum dumping (`k_dump`, `h_dump_threshold`), and 1-sigma sensor noise levels.
+* **Pointing Loss**: `pointing_ref_mrad` in `[digital_twin]` sets the attitude error at which a laser link loses $1/e$ of its capacity.
 
 ---
 

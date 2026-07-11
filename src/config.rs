@@ -7,6 +7,40 @@ use std::path::Path;
 use std::fs::File;
 use crate::models::{GroundStation, SimEnvironment};
 
+/// ADCS controller gains, actuator limits, and sensor noise defaults ([adcs] section).
+#[derive(Debug, Clone)]
+pub struct AdcsConfig {
+    pub kp: f64,
+    pub kd: f64,
+    pub rw_torque_max: f64,
+    pub mtq_dipole_max: f64,
+    pub k_dump: f64,
+    pub h_dump_threshold: f64,
+    pub gyro_bias_rad_s: f64,
+    pub gyro_noise_rad_s: f64,
+    pub mag_noise_tesla: f64,
+    pub sun_noise_rad: f64,
+    pub star_tracker_noise_rad: f64,
+}
+
+impl Default for AdcsConfig {
+    fn default() -> Self {
+        Self {
+            kp: 0.02,
+            kd: 0.2,
+            rw_torque_max: 0.02,
+            mtq_dipole_max: 5.0,
+            k_dump: 1e-3,
+            h_dump_threshold: 0.05,
+            gyro_bias_rad_s: 1e-5,
+            gyro_noise_rad_s: 1e-6,
+            mag_noise_tesla: 1e-8,
+            sun_noise_rad: 1e-3,
+            star_tracker_noise_rad: 1e-4,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub name: String,
@@ -41,6 +75,9 @@ pub struct Config {
     pub dt_time_step: f64,
     pub ref_dist_isl_km: f64,
     pub ref_dist_sgl_km: f64,
+    /// Reference pointing error (mrad) at which the laser link loses 1/e of its capacity.
+    pub pointing_ref_mrad: f64,
+    pub adcs: AdcsConfig,
 }
 
 // Cross-product helper
@@ -93,6 +130,8 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut dt_time_step = 1.0;
     let mut ref_dist_isl_km = 1000.0;
     let mut ref_dist_sgl_km = 1000.0;
+    let mut pointing_ref_mrad = 5.0;
+    let mut adcs = AdcsConfig::default();
 
     let mut current_section = String::new();
     let mut station_id = String::new();
@@ -238,6 +277,31 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
                         "time_step_s" => dt_time_step = val.parse().unwrap_or(dt_time_step),
                         "ref_distance_isl_km" => ref_dist_isl_km = val.parse().unwrap_or(ref_dist_isl_km),
                         "ref_distance_sgl_km" => ref_dist_sgl_km = val.parse().unwrap_or(ref_dist_sgl_km),
+                        "pointing_ref_mrad" => pointing_ref_mrad = val.parse().unwrap_or(pointing_ref_mrad),
+                        _ => {}
+                    }
+                }
+                // "sensors" accepted as a legacy alias: older exports kept the
+                // noise values in their own section.
+                "adcs" | "sensors" => {
+                    match key {
+                        "kp" => adcs.kp = val.parse().unwrap_or(adcs.kp),
+                        "kd" => adcs.kd = val.parse().unwrap_or(adcs.kd),
+                        "rw_torque_max" => adcs.rw_torque_max = val.parse().unwrap_or(adcs.rw_torque_max),
+                        "mtq_dipole_max" => adcs.mtq_dipole_max = val.parse().unwrap_or(adcs.mtq_dipole_max),
+                        "k_dump" => adcs.k_dump = val.parse().unwrap_or(adcs.k_dump),
+                        "h_dump_threshold" => adcs.h_dump_threshold = val.parse().unwrap_or(adcs.h_dump_threshold),
+                        // Exported as an array (per-axis); a single scalar is used internally.
+                        "gyro_bias_rad_s" => {
+                            let clean = val.replace('[', "").replace(']', "");
+                            if let Some(first) = clean.split(',').next() {
+                                adcs.gyro_bias_rad_s = first.trim().parse().unwrap_or(adcs.gyro_bias_rad_s);
+                            }
+                        }
+                        "gyro_noise_rad_s" => adcs.gyro_noise_rad_s = val.parse().unwrap_or(adcs.gyro_noise_rad_s),
+                        "mag_noise_tesla" => adcs.mag_noise_tesla = val.parse().unwrap_or(adcs.mag_noise_tesla),
+                        "sun_noise_rad" => adcs.sun_noise_rad = val.parse().unwrap_or(adcs.sun_noise_rad),
+                        "star_tracker_noise_rad" => adcs.star_tracker_noise_rad = val.parse().unwrap_or(adcs.star_tracker_noise_rad),
                         _ => {}
                     }
                 }
@@ -301,6 +365,8 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
         dt_time_step,
         ref_dist_isl_km,
         ref_dist_sgl_km,
+        pointing_ref_mrad,
+        adcs,
     })
 }
 

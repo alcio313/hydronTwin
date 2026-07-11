@@ -1,5 +1,6 @@
 use crate::models::{Satellite, OrbitType, Constellation, Segment};
 use crate::config::Config;
+use crate::adcs::{nadir_target_quaternion, nadir_body_rate};
 
 pub fn create_satellites_from_config(config: &Config) -> Constellation {
     let mut leo_sats = Vec::new();
@@ -31,8 +32,8 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
             orbit_type: OrbitType::LEO,
             r: r_eci,
             v: v_eci,
-            q: [1.0, 0.0, 0.0, 0.0],
-            omega: [0.0, 0.0, 0.0],
+            q: nadir_target_quaternion(r_eci, v_eci),
+            omega: nadir_body_rate(r_eci, v_eci),
             mass: config.leo_mass,
             area: config.leo_area,
             cd: config.leo_cd,
@@ -77,8 +78,8 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
             orbit_type: OrbitType::MEO,
             r: r_eci,
             v: v_eci,
-            q: [1.0, 0.0, 0.0, 0.0],
-            omega: [0.0, 0.0, 0.0],
+            q: nadir_target_quaternion(r_eci, v_eci),
+            omega: nadir_body_rate(r_eci, v_eci),
             mass: config.meo_mass,
             area: config.meo_area,
             cd: config.meo_cd,
@@ -118,8 +119,8 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
             orbit_type: OrbitType::GEO,
             r: r_eci,
             v: v_eci,
-            q: [1.0, 0.0, 0.0, 0.0],
-            omega: [0.0, 0.0, 0.0],
+            q: nadir_target_quaternion(r_eci, v_eci),
+            omega: nadir_body_rate(r_eci, v_eci),
             mass: config.geo_mass,
             area: config.geo_area,
             cd: config.geo_cd,

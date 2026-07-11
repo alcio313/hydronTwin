@@ -1,6 +1,7 @@
 mod models;
 mod config;
 mod math;
+mod adcs;
 mod physics;
 mod simulation;
 mod network;

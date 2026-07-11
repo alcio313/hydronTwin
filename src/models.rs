@@ -62,16 +62,6 @@ pub struct Constellation {
     pub segments: Vec<Segment>,
 }
 
-#[derive(Debug, Clone)]
-pub struct LaserLink {
-    pub from_id: String,
-    pub to_id: String,
-    pub visible: bool,
-    pub distance_km: f64,
-    pub capacity_gbps: f64,
-    pub latency_ms: f64,
-}
-
 // Global environmental parameters from config
 #[derive(Debug, Clone)]
 pub struct SimEnvironment {

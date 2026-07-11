@@ -6,6 +6,7 @@ use crate::simulation::*;
 use crate::physics::*;
 use crate::network::*;
 use crate::math::*;
+use crate::adcs::*;
 #[cfg(target_arch = "wasm32")]
 use crate::download_file;
 
@@ -62,12 +63,20 @@ pub struct HydronGuiApp {
     sun_noise: f64,
     st_noise: f64,
 
+    // ADCS closed-loop controller
+    gyro_bias: f64,
+    adcs_gains: AdcsGains,
+    sensor_rng: Lcg,
+
     // OMTQ / RW command override
     force_disturbance: bool,
     disturbance_val: [f64; 3],
 
     // Atmosphere dynamic control
     weather_overrides: Vec<Option<usize>>, // None = Markov, Some(index) = Force state
+
+    // Ground stations currently throttled at their nominal capacity (for log transitions)
+    gs_saturated: std::collections::HashSet<String>,
 
     // Filter displays
     show_leo: bool,
@@ -175,15 +184,27 @@ impl HydronGuiApp {
             sat_cd_input: config.leo_cd,
             sat_cr_input: config.leo_cr,
             
-            gyro_noise: 1e-6,
-            mag_noise: 1e-8,
-            sun_noise: 1e-3,
-            st_noise: 1e-4,
-            
+            gyro_noise: config.adcs.gyro_noise_rad_s,
+            mag_noise: config.adcs.mag_noise_tesla,
+            sun_noise: config.adcs.sun_noise_rad,
+            st_noise: config.adcs.star_tracker_noise_rad,
+
+            gyro_bias: config.adcs.gyro_bias_rad_s,
+            adcs_gains: AdcsGains {
+                kp: config.adcs.kp,
+                kd: config.adcs.kd,
+                rw_torque_max: config.adcs.rw_torque_max,
+                mtq_dipole_max: config.adcs.mtq_dipole_max,
+                k_dump: config.adcs.k_dump,
+                h_dump_threshold: config.adcs.h_dump_threshold,
+            },
+            sensor_rng: Lcg::new(2024),
+
             force_disturbance: false,
             disturbance_val: [0.0, 0.0, 0.0],
             
             weather_overrides: vec![Some(0); ground_stations.len()],
+            gs_saturated: std::collections::HashSet::new(),
             active_tab: RibbonTab::Simulation,
             show_telemetry_hud: true,
             show_logs_hud: true,
@@ -266,6 +287,16 @@ impl HydronGuiApp {
         app
     }
 
+    fn adcs_noise(&self) -> SensorNoise {
+        SensorNoise {
+            gyro_bias: self.gyro_bias,
+            gyro_noise: self.gyro_noise,
+            mag_noise: self.mag_noise,
+            sun_noise: self.sun_noise,
+            st_noise: self.st_noise,
+        }
+    }
+
     fn log(&mut self, msg: &str) {
         self.logs.push(format!("[{:.1}s] {}", self.current_time, msg));
         if self.logs.len() > 100 {
@@ -325,9 +356,11 @@ impl HydronGuiApp {
         let sim_duration = 86400.0;
         let step_size = 10.0; // 10s steps for excellent resolution
         let mut current_time = 0.0;
-        
+
         let sun_vector = [1.0, 0.0, 0.0];
         let b_eci_mock = [1e-5, 2e-5, -3e-5];
+        let noise = self.adcs_noise();
+        let mut rng = Lcg::new(99);
 
         while current_time <= sim_duration {
             // 1. Step atmosphere
@@ -340,13 +373,15 @@ impl HydronGuiApp {
                 }
             }
 
-            // 2. Step satellite dynamics
+            // 2. Step satellite dynamics with the closed-loop ADCS controller
             for segment in &mut constellation.segments {
                 for sat in &mut segment.satellites {
-                    let rw_torque = [1e-3, -5e-4, 2e-4];
-                    let mtq_dipole = [0.1, -0.05, 0.1];
+                    let q_target = nadir_target_quaternion(sat.r, sat.v);
+                    let b_body = rotate_vector_q(sat.q, b_eci_mock);
+                    let (rw_torque, mtq_dipole) =
+                        compute_adcs_command(sat, q_target, b_body, &self.adcs_gains, &noise, &mut rng);
                     step_orbit(sat, step_size, &self.config.env, sun_vector);
-                    step_attitude(sat, step_size, b_eci_mock, rw_torque, mtq_dipole);
+                    step_attitude(sat, step_size, b_eci_mock, rw_torque, mtq_dipole, [0.0; 3]);
                 }
             }
 
@@ -359,181 +394,22 @@ impl HydronGuiApp {
                 [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
             ];
 
-            let all_sats: Vec<(String, OrbitType, [f64; 3])> = constellation.segments.iter()
-                .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
-                .collect();
-
             let gs_eci_list: Vec<[f64; 3]> = ground_stations.iter().map(|gs| {
                 let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
                 mat_vec_mult(rot_mat_t, ecef)
             }).collect();
 
-            let mut gs_throughputs = vec![0.0; ground_stations.len()];
-            let mut total_throughput = 0.0;
-            let mut active_sgl_links = 0;
-            let mut active_isl_links = 0;
+            // Shared routing pass (same allocation model as the live view)
+            let (route_nodes, _pointing) = self.build_route_nodes(&constellation);
+            let gs_nodes: Vec<GroundNode> = gs_eci_list.iter().zip(ground_stations.iter())
+                .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps })
+                .collect();
+            let routing = route_network(&route_nodes, &gs_nodes, self.prioritize_relay, &self.config.env);
 
-            // Track best SGL for LEO satellites
-            let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
-            let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
-
-            // SGL links capacity
-            for (sat_idx, (_sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
-                let sat_max = match orbit_type {
-                    OrbitType::LEO => self.leo_max_bitrate,
-                    OrbitType::MEO => self.meo_max_bitrate,
-                    OrbitType::GEO => self.geo_max_bitrate,
-                };
-                let sat_ref_dist = match orbit_type {
-                    OrbitType::LEO => self.config.ref_dist_sgl_km,
-                    OrbitType::MEO => self.config.meo_alt_km,
-                    OrbitType::GEO => self.config.geo_alt_km,
-                };
-
-                let mut best_cap = 0.0_f64;
-                let mut best_idx = usize::MAX;
-                for (i, other_eci) in gs_eci_list.iter().enumerate() {
-                    let cap = compute_link_capacity(
-                        *sat_r, *other_eci, true,
-                        ground_stations[i].k_value,
-                        sat_ref_dist, sat_max, &self.config.env
-                    ).min(sat_max);
-                    if cap > best_cap {
-                        best_cap = cap;
-                        best_idx = i;
-                    }
-                }
-
-                if best_idx < ground_stations.len() && best_cap > 0.0 {
-                    if orbit_type == &OrbitType::LEO {
-                        leo_best_gs[sat_idx] = best_idx;
-                        leo_best_gs_cap[sat_idx] = best_cap;
-                    } else {
-                        // MEO and GEO SGL links are allocated immediately
-                        gs_throughputs[best_idx] += best_cap;
-                        total_throughput += best_cap;
-                        active_sgl_links += 1;
-                    }
-                }
-            }
-
-            // ISL links
-            // ponytail: greedy satellite link allocation. Limits LEO satellites to 1 connection.
-            // O(N^2 log N) sort of candidates, which is fine for small constellations (<100 satellites).
-            // Widest-path reach to ground, allowing multi-hop relaying through MEO/GEO relays.
-            let cap_to_ground = self.ground_reach(&all_sats, &gs_eci_list, &ground_stations);
-
-            let mut candidate_isls = Vec::new();
-            for i in 0..all_sats.len() {
-                for j in (i + 1)..all_sats.len() {
-                    let (_id1, type1, r1) = &all_sats[i];
-                    let (_id2, type2, r2) = &all_sats[j];
-
-                    // An endpoint may carry traffic if it can reach the ground directly or by
-                    // relaying through a chain of relays (encoded by cap_to_ground).
-                    let id1_has_sgl = cap_to_ground[i] > 0.0;
-                    let id2_has_sgl = cap_to_ground[j] > 0.0;
-                    let is_allowed = id1_has_sgl || id2_has_sgl;
-
-                    if is_allowed && visible(*r1, *r2, self.config.env.r_earth) {
-                        let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
-                        let capacity = if is_leo {
-                            self.leo_max_bitrate
-                        } else {
-                            let sat_max1 = match type1 {
-                                OrbitType::LEO => self.leo_max_bitrate,
-                                OrbitType::MEO => self.meo_max_bitrate,
-                                OrbitType::GEO => self.geo_max_bitrate,
-                            };
-                            let sat_max2 = match type2 {
-                                OrbitType::LEO => self.leo_max_bitrate,
-                                OrbitType::MEO => self.meo_max_bitrate,
-                                OrbitType::GEO => self.geo_max_bitrate,
-                            };
-                            let nominal_capacity = sat_max1.min(sat_max2);
-                            let sat_ref_dist = match type1 {
-                                OrbitType::LEO => self.config.ref_dist_isl_km,
-                                OrbitType::MEO => self.config.meo_alt_km,
-                                OrbitType::GEO => self.config.geo_alt_km,
-                            };
-                            compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
-                        };
-                        let mut capacity = capacity;
-                        // Bound by the downstream reach-to-ground so the relay chain bottleneck
-                        // (and the relay's own max capacity) limits the LEO's usable bitrate.
-                        let cap1 = cap_to_ground[i];
-                        let cap2 = cap_to_ground[j];
-
-                        if id1_has_sgl && id2_has_sgl {
-                            capacity = capacity.min(cap1.max(cap2));
-                        } else if id1_has_sgl {
-                            capacity = capacity.min(cap1);
-                        } else if id2_has_sgl {
-                            capacity = capacity.min(cap2);
-                        }
-                        if capacity > 0.0 {
-                            let class = match (type1, type2) {
-                                (OrbitType::LEO, OrbitType::LEO) => 2,
-                                (OrbitType::LEO, _) | (_, OrbitType::LEO) => 1,
-                                _ => 0,
-                            };
-                            candidate_isls.push((class, capacity, i, j));
-                        }
-                    }
-                }
-            }
-
-            // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
-            if !self.prioritize_relay {
-                for i in 0..all_sats.len() {
-                    let (_, type_i, _) = &all_sats[i];
-                    if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
-                        candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
-                    }
-                }
-            }
-
-            candidate_isls.sort_by(|a, b| {
-                a.0.cmp(&b.0) // class ascending
-                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)) // capacity descending
-                    .then_with(|| a.2.cmp(&b.2))
-                    .then_with(|| a.3.cmp(&b.3))
-            });
-
-            let mut leo_isl_count = std::collections::HashMap::new();
-            for (_class, capacity, i, j) in candidate_isls {
-                let (id1, type1, _) = &all_sats[i];
-
-                if j == usize::MAX {
-                    if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                        continue;
-                    }
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-
-                    let gs_idx = leo_best_gs[i];
-                    gs_throughputs[gs_idx] += capacity;
-                    total_throughput += capacity;
-                    active_sgl_links += 1;
-                } else {
-                    let (id2, type2, _) = &all_sats[j];
-
-                    if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                        continue;
-                    }
-                    if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
-                        continue;
-                    }
-
-                    if type1 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-                    }
-                    if type2 == &OrbitType::LEO {
-                        *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
-                    }
-
-                    active_isl_links += 1;
-                }
-            }
+            let gs_throughputs = routing.gs_throughputs;
+            let total_throughput = routing.total_throughput;
+            let active_sgl_links = routing.sgl_links.len();
+            let active_isl_links = routing.isl_links.len();
 
             // Write CSV row
             let mut row_str = format!("{:.1}", current_time);
@@ -549,28 +425,38 @@ impl HydronGuiApp {
         Ok(filename.to_string())
     }
 
-    /// Widest-path ground-reach routing for the current satellite/ground geometry.
-    /// Relays (MEO/GEO) forward traffic for satellites that have no direct ground link, so a
-    /// LEO's reachable bitrate is bounded by the bottleneck of the relay chain to the ground.
-    fn ground_reach(
+    /// Build the routing nodes for `route_network`, computing each satellite's
+    /// pointing-loss factor from its current ADCS attitude error. Iterates the
+    /// constellation in the same flat order used to build `all_sats`.
+    /// Returns (nodes, map sat_id → (pointing_error_rad, loss_factor)).
+    fn build_route_nodes(
         &self,
-        all_sats: &[(String, OrbitType, [f64; 3])],
-        gs_eci: &[[f64; 3]],
-        stations: &[GroundStation],
-    ) -> Vec<f64> {
-        let nodes: Vec<RouteNode> = all_sats
-            .iter()
-            .map(|(_, orbit_type, r)| {
-                let (max_cap, sgl_ref_dist, isl_ref_dist, is_relay) = match orbit_type {
+        constellation: &Constellation,
+    ) -> (Vec<RouteNode>, std::collections::HashMap<String, (f64, f64)>) {
+        let ref_rad = self.config.pointing_ref_mrad / 1000.0;
+        let mut nodes = Vec::new();
+        let mut pointing = std::collections::HashMap::new();
+        for seg in &constellation.segments {
+            for sat in &seg.satellites {
+                let (max_cap, sgl_ref_dist, isl_ref_dist, is_relay) = match sat.orbit_type {
                     OrbitType::LEO => (self.leo_max_bitrate, self.config.ref_dist_sgl_km, self.config.ref_dist_isl_km, false),
                     OrbitType::MEO => (self.meo_max_bitrate, self.config.meo_alt_km, self.config.meo_alt_km, true),
                     OrbitType::GEO => (self.geo_max_bitrate, self.config.geo_alt_km, self.config.geo_alt_km, true),
                 };
-                RouteNode { is_relay, max_cap, sgl_ref_dist, isl_ref_dist, r: *r }
-            })
-            .collect();
-        let gs_k: Vec<f64> = stations.iter().map(|g| g.k_value).collect();
-        compute_ground_reach(&nodes, gs_eci, &gs_k, &self.config.env)
+                let err = pointing_error_rad(sat.q, nadir_target_quaternion(sat.r, sat.v));
+                let point_factor = pointing_loss_factor(err, ref_rad);
+                pointing.insert(sat.id.clone(), (err, point_factor));
+                nodes.push(RouteNode {
+                    is_relay,
+                    max_cap,
+                    sgl_ref_dist,
+                    isl_ref_dist,
+                    r: sat.r,
+                    point_factor,
+                });
+            }
+        }
+        (nodes, pointing)
     }
 
     fn drag_satellite_to(&mut self, sat_id: &str, mouse_pos: egui::Pos2, center: egui::Pos2, scale_factor: f64) {
@@ -676,6 +562,20 @@ impl HydronGuiApp {
                 self.update_input_fields_for_selected();
                 self.weather_overrides = vec![Some(0); self.ground_stations.len()];
                 self.history_stations = vec![vec![0.0f32; self.history_time.len()]; self.ground_stations.len()];
+                // Sync ADCS runtime parameters with the imported config
+                self.gyro_noise = self.config.adcs.gyro_noise_rad_s;
+                self.mag_noise = self.config.adcs.mag_noise_tesla;
+                self.sun_noise = self.config.adcs.sun_noise_rad;
+                self.st_noise = self.config.adcs.star_tracker_noise_rad;
+                self.gyro_bias = self.config.adcs.gyro_bias_rad_s;
+                self.adcs_gains = AdcsGains {
+                    kp: self.config.adcs.kp,
+                    kd: self.config.adcs.kd,
+                    rw_torque_max: self.config.adcs.rw_torque_max,
+                    mtq_dipole_max: self.config.adcs.mtq_dipole_max,
+                    k_dump: self.config.adcs.k_dump,
+                    h_dump_threshold: self.config.adcs.h_dump_threshold,
+                };
                 self.log(&format!("Configurazione importata correttamente da {}", source_name));
                 Ok(())
             }
@@ -767,16 +667,17 @@ impl HydronGuiApp {
         toml.push_str("]\n\n");
 
         toml.push_str("[adcs]\n");
-        toml.push_str("rw_max_torque_nm = 0.01\n");
-        toml.push_str("rw_max_momentum_nms = 0.1\n");
-        toml.push_str("mtq_max_dipole_am2 = 0.2\n\n");
-
-        toml.push_str("[sensors]\n");
-        toml.push_str("gyro_bias_rad_s = [1e-5, 1e-5, 1e-5]\n");
-        toml.push_str("gyro_noise_rad_s = 1e-6\n");
-        toml.push_str("mag_noise_tesla = 1e-8\n");
-        toml.push_str("sun_noise_rad = 1e-3\n");
-        toml.push_str("star_tracker_noise_rad = 1e-4\n\n");
+        toml.push_str(&format!("kp = {:e}\n", self.adcs_gains.kp));
+        toml.push_str(&format!("kd = {:e}\n", self.adcs_gains.kd));
+        toml.push_str(&format!("rw_torque_max = {:e}\n", self.adcs_gains.rw_torque_max));
+        toml.push_str(&format!("mtq_dipole_max = {:e}\n", self.adcs_gains.mtq_dipole_max));
+        toml.push_str(&format!("k_dump = {:e}\n", self.adcs_gains.k_dump));
+        toml.push_str(&format!("h_dump_threshold = {:e}\n", self.adcs_gains.h_dump_threshold));
+        toml.push_str(&format!("gyro_bias_rad_s = {:e}\n", self.gyro_bias));
+        toml.push_str(&format!("gyro_noise_rad_s = {:e}\n", self.gyro_noise));
+        toml.push_str(&format!("mag_noise_tesla = {:e}\n", self.mag_noise));
+        toml.push_str(&format!("sun_noise_rad = {:e}\n", self.sun_noise));
+        toml.push_str(&format!("star_tracker_noise_rad = {:e}\n\n", self.st_noise));
 
         toml.push_str("[environment]\n");
         toml.push_str(&format!("mu = {:.10e}\n", c.env.mu));
@@ -792,7 +693,8 @@ impl HydronGuiApp {
         toml.push_str(&format!("sim_duration_s = 86400.0\n"));
         toml.push_str(&format!("ref_distance_isl_km = {:.1}\n", c.ref_dist_isl_km));
         toml.push_str(&format!("ref_distance_sgl_km = {:.1}\n", c.ref_dist_sgl_km));
-        
+        toml.push_str(&format!("pointing_ref_mrad = {:.2}\n", c.pointing_ref_mrad));
+
         toml
     }
 
@@ -996,20 +898,26 @@ impl eframe::App for HydronGuiApp {
                     }
                 }
 
-                // Step satellite dynamics
+                // Step satellite dynamics with the closed-loop ADCS controller
+                let gains = self.adcs_gains.clone();
+                let noise = self.adcs_noise();
                 for segment in &mut self.constellation.segments {
                     for sat in &mut segment.satellites {
-                        let rw_torque = [1e-3, -5e-4, 2e-4];
-                        let mut mtq_dipole = [0.1, -0.05, 0.1];
+                        let q_target = nadir_target_quaternion(sat.r, sat.v);
+                        let b_body = rotate_vector_q(sat.q, b_eci_mock);
+                        let (rw_torque, mtq_dipole) =
+                            compute_adcs_command(sat, q_target, b_body, &gains, &noise, &mut self.sensor_rng);
 
+                        // Injected disturbance is a real external torque on the body
+                        let mut tau_ext = [0.0; 3];
                         if sat.id == self.selected_satellite_id && self.force_disturbance {
-                            mtq_dipole = add(mtq_dipole, self.disturbance_val);
+                            tau_ext = self.disturbance_val;
                             self.force_disturbance = false;
                             pending_logs.push(format!("Injected attitude disturbance into satellite {}", sat.id));
                         }
 
                         step_orbit(sat, dt, &self.config.env, sun_vector);
-                        step_attitude(sat, dt, b_eci_mock, rw_torque, mtq_dipole);
+                        step_attitude(sat, dt, b_eci_mock, rw_torque, mtq_dipole, tau_ext);
                     }
                 }
             }
@@ -1038,197 +946,81 @@ impl eframe::App for HydronGuiApp {
             mat_vec_mult(rot_mat_t, ecef)
         }).collect();
 
-        // Pre-calculate connected satellites for each GS and throughputs
-        let mut connected_sats_per_gs = vec![Vec::new(); self.ground_stations.len()];
-        let mut gs_throughputs = vec![0.0f32; self.ground_stations.len()];
-        let mut total_throughput = 0.0f32;
+        // Routing pass: pointing-aware, capacity-constrained allocation over the
+        // current geometry (shared with the 24h exporter via route_network).
+        let (route_nodes, sat_pointing) = self.build_route_nodes(&self.constellation);
+        let gs_nodes: Vec<GroundNode> = gs_eci_list.iter().zip(self.ground_stations.iter())
+            .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps })
+            .collect();
+        let routing = route_network(&route_nodes, &gs_nodes, self.prioritize_relay, &self.config.env);
 
-        // Track best SGL for LEO satellites
-        let mut leo_best_gs = vec![usize::MAX; all_sats.len()];
-        let mut leo_best_gs_cap = vec![0.0; all_sats.len()];
+        let mut connected_sats_per_gs: Vec<Vec<(String, &str, f64, f64)>> = vec![Vec::new(); self.ground_stations.len()];
+        let gs_throughputs: Vec<f32> = routing.gs_throughputs.iter().map(|v| *v as f32).collect();
+        let total_throughput = routing.total_throughput as f32;
 
-        for (sat_idx, (sat_id, orbit_type, sat_r)) in all_sats.iter().enumerate() {
-            let sat_max = match orbit_type {
-                OrbitType::LEO => self.leo_max_bitrate,
-                OrbitType::MEO => self.meo_max_bitrate,
-                OrbitType::GEO => self.geo_max_bitrate,
-            };
-            let sat_ref_dist = match orbit_type {
-                OrbitType::LEO => self.config.ref_dist_sgl_km,
-                OrbitType::MEO => self.config.meo_alt_km,
-                OrbitType::GEO => self.config.geo_alt_km,
-            };
+        let mut sat_sgl_link = std::collections::HashMap::new();
+        // sat_id -> (gs_idx, allocated Gbps), used to draw the SGL beams
+        let mut sat_sgl_draw = std::collections::HashMap::new();
+        for &(sat_idx, gs_idx, cap) in &routing.sgl_links {
+            let (sat_id, orbit_type, _) = &all_sats[sat_idx];
             let orbit_label = match orbit_type {
                 OrbitType::LEO => "LEO",
                 OrbitType::MEO => "MEO",
                 OrbitType::GEO => "GEO",
             };
-
-            let mut best_cap = 0.0_f64;
-            let mut best_idx = usize::MAX;
-            for (i, other_eci) in gs_eci_list.iter().enumerate() {
-                let cap = compute_link_capacity(
-                    *sat_r, *other_eci, true,
-                    self.ground_stations[i].k_value,
-                    sat_ref_dist, sat_max, &self.config.env
-                ).min(sat_max);
-                if cap > best_cap {
-                    best_cap = cap;
-                    best_idx = i;
-                }
-            }
-
-            if best_idx < self.ground_stations.len() && best_cap > 0.0 {
-                if orbit_type == &OrbitType::LEO {
-                    leo_best_gs[sat_idx] = best_idx;
-                    leo_best_gs_cap[sat_idx] = best_cap;
-                } else {
-                    connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_label, best_cap, sat_max));
-                    gs_throughputs[best_idx] += best_cap as f32;
-                    total_throughput += best_cap as f32;
-                }
-            }
+            let sat_max = match orbit_type {
+                OrbitType::LEO => self.leo_max_bitrate,
+                OrbitType::MEO => self.meo_max_bitrate,
+                OrbitType::GEO => self.geo_max_bitrate,
+            };
+            connected_sats_per_gs[gs_idx].push((sat_id.clone(), orbit_label, cap, sat_max));
+            sat_sgl_link.insert(sat_id.clone(), (self.ground_stations[gs_idx].name.clone(), cap));
+            sat_sgl_draw.insert(sat_id.clone(), (gs_idx, cap));
         }
 
-        let mut sat_sgl_link = std::collections::HashMap::new();
-        for (gs_idx, gs_conn) in connected_sats_per_gs.iter().enumerate() {
-            let gs_name = &self.ground_stations[gs_idx].name;
-            for (sat_id, _, cap, _) in gs_conn {
-                sat_sgl_link.insert(sat_id.clone(), (gs_name.clone(), *cap));
-            }
-        }
-
-        // Widest-path reach to ground, allowing multi-hop relaying through MEO/GEO relays:
-        // a relay with no direct ground link can still reach the ground through another relay.
-        // cap_to_ground[k] is the resulting bottleneck bitrate satellite k can push to ground.
-        let cap_to_ground = self.ground_reach(&all_sats, &gs_eci_list, &self.ground_stations);
-
-        // Pre-calculate active ISL links
-        let mut candidate_isls = Vec::new();
-        for i in 0..all_sats.len() {
-            for j in (i + 1)..all_sats.len() {
-                let (_id1, type1, r1) = &all_sats[i];
-                let (_id2, type2, r2) = &all_sats[j];
-
-                // An endpoint may carry traffic if it can reach the ground — directly or by
-                // relaying through a chain of relays (that is what cap_to_ground encodes).
-                let id1_has_sgl = cap_to_ground[i] > 0.0;
-                let id2_has_sgl = cap_to_ground[j] > 0.0;
-                let is_allowed = id1_has_sgl || id2_has_sgl;
-
-                let show_link = match (type1, type2) {
-                    (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
-                    (OrbitType::MEO, OrbitType::MEO) => self.show_meo,
-                    (OrbitType::GEO, OrbitType::GEO) => self.show_geo,
-                    _ => self.show_meo || self.show_geo || self.show_leo,
-                } && is_allowed;
-
-                if show_link && visible(*r1, *r2, self.config.env.r_earth) {
-                    let is_leo = type1 == &OrbitType::LEO || type2 == &OrbitType::LEO;
-                    let capacity = if is_leo {
-                        self.leo_max_bitrate
-                    } else {
-                        let sat_max1 = match type1 {
-                            OrbitType::LEO => self.leo_max_bitrate,
-                            OrbitType::MEO => self.meo_max_bitrate,
-                            OrbitType::GEO => self.geo_max_bitrate,
-                        };
-                        let sat_max2 = match type2 {
-                            OrbitType::LEO => self.leo_max_bitrate,
-                            OrbitType::MEO => self.meo_max_bitrate,
-                            OrbitType::GEO => self.geo_max_bitrate,
-                        };
-                        let nominal_capacity = sat_max1.min(sat_max2);
-                        let sat_ref_dist = match type1 {
-                            OrbitType::LEO => self.config.ref_dist_isl_km,
-                            OrbitType::MEO => self.config.meo_alt_km,
-                            OrbitType::GEO => self.config.geo_alt_km,
-                        };
-                        compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
-                    };
-                    let mut capacity = capacity;
-                    // Bound the link by the downstream reach-to-ground of whichever endpoint
-                    // carries the traffic onward, so the relay chain's bottleneck (and the
-                    // relay's own max capacity) limits the bitrate available to LEO terminals.
-                    let cap1 = cap_to_ground[i];
-                    let cap2 = cap_to_ground[j];
-
-                    if id1_has_sgl && id2_has_sgl {
-                        capacity = capacity.min(cap1.max(cap2));
-                    } else if id1_has_sgl {
-                        capacity = capacity.min(cap1);
-                    } else if id2_has_sgl {
-                        capacity = capacity.min(cap2);
-                    }
-                    if capacity > 0.0 {
-                        let class = match (type1, type2) {
-                            (OrbitType::LEO, OrbitType::LEO) => 2,
-                            (OrbitType::LEO, _) | (_, OrbitType::LEO) => 1,
-                            _ => 0,
-                        };
-                        candidate_isls.push((class, capacity, i, j));
-                    }
-                }
-            }
-        }
-
-        // Add LEO SGL candidates — only if prioritize_relay (Relay Only) is inactive.
-        if !self.prioritize_relay {
-            for i in 0..all_sats.len() {
-                let (_, type_i, _) = &all_sats[i];
-                if type_i == &OrbitType::LEO && leo_best_gs_cap[i] > 0.0 {
-                    candidate_isls.push((0, leo_best_gs_cap[i], i, usize::MAX));
-                }
-            }
-        }
-
-        candidate_isls.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
-                .then_with(|| a.2.cmp(&b.2))
-                .then_with(|| a.3.cmp(&b.3))
-        });
-
-        let mut leo_isl_count = std::collections::HashMap::new();
         let mut active_isls = Vec::new();
         let mut sat_isl_link = std::collections::HashMap::new();
-
-        for (_class, capacity, i, j) in candidate_isls {
+        for &(i, j, capacity) in &routing.isl_links {
             let (id1, type1, _) = &all_sats[i];
-
-            if j == usize::MAX {
-                if *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-                *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-
-                let gs_idx = leo_best_gs[i];
-                let gs_name = &self.ground_stations[gs_idx].name;
-                connected_sats_per_gs[gs_idx].push((id1.clone(), "LEO", capacity, self.leo_max_bitrate));
-                gs_throughputs[gs_idx] += capacity as f32;
-                total_throughput += capacity as f32;
-                sat_sgl_link.insert(id1.clone(), (gs_name.clone(), capacity));
-            } else {
-                let (id2, type2, _) = &all_sats[j];
-
-                if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-                if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
-                    continue;
-                }
-
-                if type1 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id1.clone()).or_insert(0) += 1;
-                }
-                if type2 == &OrbitType::LEO {
-                    *leo_isl_count.entry(id2.clone()).or_insert(0) += 1;
-                }
-
+            let (id2, type2, _) = &all_sats[j];
+            let show_link = match (type1, type2) {
+                (OrbitType::LEO, OrbitType::LEO) => self.show_leo,
+                (OrbitType::MEO, OrbitType::MEO) => self.show_meo,
+                (OrbitType::GEO, OrbitType::GEO) => self.show_geo,
+                _ => self.show_meo || self.show_geo || self.show_leo,
+            };
+            if show_link {
                 active_isls.push((i, j, capacity));
-                sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
-                sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
             }
+            sat_isl_link.insert(id1.clone(), (id2.clone(), capacity));
+            sat_isl_link.insert(id2.clone(), (id1.clone(), capacity));
+        }
+
+        // Per-satellite carried bitrate (Bitrates HUD): own traffic for LEO
+        // terminals, payload utilization (own + forwarded) for MEO/GEO relays.
+        let sat_rate: std::collections::HashMap<String, f64> = all_sats.iter().enumerate()
+            .map(|(k, (id, _, _))| (id.clone(), routing.sat_carried_rate[k]))
+            .collect();
+
+        // Log ground station saturation transitions
+        let mut pending_gs_logs: Vec<String> = Vec::new();
+        for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
+            let cap = gs.downlink_nominal_gbps;
+            let saturated = cap.is_finite() && routing.gs_throughputs[gs_idx] >= cap * 0.999;
+            let was_saturated = self.gs_saturated.contains(&gs.id);
+            if saturated && !was_saturated {
+                self.gs_saturated.insert(gs.id.clone());
+                pending_gs_logs.push(format!(
+                    "Ground station {} saturated: throughput capped at {:.1} Gbps",
+                    gs.name, cap
+                ));
+            } else if !saturated && was_saturated {
+                self.gs_saturated.remove(&gs.id);
+                pending_gs_logs.push(format!("Ground station {} no longer saturated", gs.name));
+            }
+        }
+        for msg in pending_gs_logs.drain(..) {
+            self.log(&msg);
         }
 
         // Update history if running
@@ -1292,10 +1084,17 @@ impl eframe::App for HydronGuiApp {
                                         for gs in &mut self.ground_stations {
                                             step_atmosphere(gs, &mut self.atmos_model);
                                         }
+                                        let gains = self.adcs_gains.clone();
+                                        let noise = self.adcs_noise();
+                                        let step_size = self.step_size;
                                         for segment in &mut self.constellation.segments {
                                             for sat in &mut segment.satellites {
-                                                step_orbit(sat, self.step_size, &self.config.env, sun_vector);
-                                                step_attitude(sat, self.step_size, b_eci_mock, [1e-3, -5e-4, 2e-4], [0.1, -0.05, 0.1]);
+                                                let q_target = nadir_target_quaternion(sat.r, sat.v);
+                                                let b_body = rotate_vector_q(sat.q, b_eci_mock);
+                                                let (rw_torque, mtq_dipole) =
+                                                    compute_adcs_command(sat, q_target, b_body, &gains, &noise, &mut self.sensor_rng);
+                                                step_orbit(sat, step_size, &self.config.env, sun_vector);
+                                                step_attitude(sat, step_size, b_eci_mock, rw_torque, mtq_dipole, [0.0; 3]);
                                             }
                                         }
                                         self.log("Single Step Executed");
@@ -1618,8 +1417,8 @@ impl eframe::App for HydronGuiApp {
                                                 orbit_type: self.add_sat_orbit_type.clone(),
                                                 r: r_eci,
                                                 v: v_eci,
-                                                q: [1.0, 0.0, 0.0, 0.0],
-                                                omega: [0.0, 0.0, 0.0],
+                                                q: nadir_target_quaternion(r_eci, v_eci),
+                                                omega: nadir_body_rate(r_eci, v_eci),
                                                 mass: self.add_sat_mass,
                                                 area: self.add_sat_area,
                                                 cd: self.add_sat_cd,
@@ -1661,6 +1460,138 @@ impl eframe::App for HydronGuiApp {
                                     });
                                 });
                             });
+
+                            // Custom Satellites List Group
+                            let mut has_custom_sats = false;
+                            for seg_idx in 0..3 {
+                                if seg_idx < self.constellation.segments.len() {
+                                    if self.constellation.segments[seg_idx].satellites.iter().any(|s| s.is_custom) {
+                                        has_custom_sats = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if has_custom_sats {
+                                ui.group(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new("CUSTOM SATELLITES").strong().color(egui::Color32::LIGHT_BLUE));
+                                        egui::ScrollArea::vertical()
+                                            .max_height(70.0)
+                                            .id_source("custom_sats_scroll")
+                                            .show(ui, |ui| {
+                                                let mut to_remove = None;
+                                                for seg_idx in 0..3 {
+                                                    if seg_idx < self.constellation.segments.len() {
+                                                        for (sat_idx, sat) in self.constellation.segments[seg_idx].satellites.iter().enumerate() {
+                                                            if sat.is_custom {
+                                                                ui.horizontal(|ui| {
+                                                                    ui.small(&sat.id);
+                                                                    if ui.button("❌").clicked() {
+                                                                        to_remove = Some((seg_idx, sat_idx, sat.id.clone()));
+                                                                    }
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if let Some((seg_idx, sat_idx, sat_id)) = to_remove {
+                                                    self.constellation.segments[seg_idx].satellites.remove(sat_idx);
+                                                    if self.selected_satellite_id == sat_id {
+                                                        let mut found_any = false;
+                                                        for seg in &self.constellation.segments {
+                                                            if !seg.satellites.is_empty() {
+                                                                self.selected_satellite_id = seg.satellites[0].id.clone();
+                                                                found_any = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if !found_any {
+                                                            self.selected_satellite_id = "None".to_string();
+                                                        }
+                                                        self.update_input_fields_for_selected();
+                                                    }
+                                                    match seg_idx {
+                                                        0 => {
+                                                            if self.config.leo_num > 0 { self.config.leo_num -= 1; }
+                                                            self.leo_num_input = self.config.leo_num;
+                                                        }
+                                                        1 => {
+                                                            if self.config.meo_num > 0 { self.config.meo_num -= 1; }
+                                                            self.meo_num_input = self.config.meo_num;
+                                                        }
+                                                        2 => {
+                                                            if self.config.geo_num > 0 { self.config.geo_num -= 1; }
+                                                            self.geo_num_input = self.config.geo_num;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                    self.log(&format!("Removed custom satellite: {}", sat_id));
+                                                }
+                                            });
+                                    });
+                                });
+                            }
+
+                            // Custom Constellations List Group
+                            if self.constellation.segments.len() > 3 {
+                                ui.group(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new("CUSTOM CONSTELLATIONS").strong().color(egui::Color32::LIGHT_BLUE));
+                                        egui::ScrollArea::vertical()
+                                            .max_height(70.0)
+                                            .id_source("custom_const_scroll")
+                                            .show(ui, |ui| {
+                                                let mut to_remove_seg = None;
+                                                for seg_idx in 3..self.constellation.segments.len() {
+                                                    let seg = &self.constellation.segments[seg_idx];
+                                                    let name = if let Some(sat) = seg.satellites.first() {
+                                                        if let Some(idx) = sat.id.rfind('_') {
+                                                            sat.id[..idx].to_string()
+                                                        } else {
+                                                            sat.id.clone()
+                                                        }
+                                                    } else {
+                                                        format!("Constellation {}", seg_idx - 2)
+                                                    };
+                                                    ui.horizontal(|ui| {
+                                                        ui.small(format!("{} ({} sats)", name, seg.satellites.len()));
+                                                        if ui.button("❌").clicked() {
+                                                            to_remove_seg = Some((seg_idx, name.clone()));
+                                                        }
+                                                    });
+                                                }
+                                                if let Some((seg_idx, name)) = to_remove_seg {
+                                                    let mut selected_was_removed = false;
+                                                    let removed_sat_ids: std::collections::HashSet<String> = self.constellation.segments[seg_idx].satellites.iter()
+                                                        .map(|s| s.id.clone())
+                                                        .collect();
+                                                    if removed_sat_ids.contains(&self.selected_satellite_id) {
+                                                        selected_was_removed = true;
+                                                    }
+
+                                                    self.constellation.segments.remove(seg_idx);
+
+                                                    if selected_was_removed {
+                                                        let mut found_any = false;
+                                                        for seg in &self.constellation.segments {
+                                                            if !seg.satellites.is_empty() {
+                                                                self.selected_satellite_id = seg.satellites[0].id.clone();
+                                                                found_any = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if !found_any {
+                                                            self.selected_satellite_id = "None".to_string();
+                                                        }
+                                                        self.update_input_fields_for_selected();
+                                                    }
+                                                    self.log(&format!("Removed custom constellation: {}", name));
+                                                }
+                                            });
+                                    });
+                                });
+                            }
 
                             ui.group(|ui| {
                                 ui.vertical(|ui| {
@@ -1777,8 +1708,8 @@ impl eframe::App for HydronGuiApp {
                                                     orbit_type: self.add_const_orbit_type.clone(),
                                                     r: r_eci,
                                                     v: v_eci,
-                                                    q: [1.0, 0.0, 0.0, 0.0],
-                                                    omega: [0.0, 0.0, 0.0],
+                                                    q: nadir_target_quaternion(r_eci, v_eci),
+                                                    omega: nadir_body_rate(r_eci, v_eci),
                                                     mass: self.add_const_mass,
                                                     area: self.add_const_area,
                                                     cd: self.add_const_cd,
@@ -2102,6 +2033,18 @@ impl eframe::App for HydronGuiApp {
                             ui.small(format!("Q: [{:.4}, {:.4}, {:.4}, {:.4}]", q[0], q[1], q[2], q[3]));
                             ui.small(format!("Omega: [{:.4}, {:.4}, {:.4}] rad/s", omega[0], omega[1], omega[2]));
                             ui.small(format!("H_rw: [{:.4}, {:.4}, {:.4}] Nms", h_rw[0], h_rw[1], h_rw[2]));
+                            if let Some((err_rad, loss_factor)) = sat_pointing.get(&self.selected_satellite_id) {
+                                let err_deg = err_rad.to_degrees();
+                                let loss_pct = (1.0 - loss_factor) * 100.0;
+                                let color = if loss_pct < 1.0 {
+                                    egui::Color32::from_rgb(34, 197, 94)
+                                } else if loss_pct < 50.0 {
+                                    egui::Color32::from_rgb(234, 179, 8)
+                                } else {
+                                    egui::Color32::from_rgb(239, 68, 68)
+                                };
+                                ui.colored_label(color, format!("Pointing err: {:.4}°  (loss {:.1}%)", err_deg, loss_pct));
+                            }
                         }
                         ui.separator();
                         // Link geometry towards connected GS / ISL partner
@@ -2165,7 +2108,16 @@ impl eframe::App for HydronGuiApp {
                                     });
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.small(format!("Throughput: {:.1} Gbps", total_gbps));
+                                    let saturated = gs.downlink_nominal_gbps.is_finite()
+                                        && total_gbps >= gs.downlink_nominal_gbps * 0.999;
+                                    if saturated {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(239, 68, 68),
+                                            egui::RichText::new(format!("Throughput: {:.1} Gbps (SATURA)", total_gbps)).small(),
+                                        );
+                                    } else {
+                                        ui.small(format!("Throughput: {:.1} Gbps", total_gbps));
+                                    }
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         let cap_str = if gs.downlink_nominal_gbps.is_infinite() {
                                             "Illimitata".to_string()
@@ -2216,10 +2168,9 @@ impl eframe::App for HydronGuiApp {
                         all_sats.sort();
 
                         for sat_id in all_sats {
-                            let sgl_info = sat_sgl_link.get(&sat_id);
-                            let _isl_info = sat_isl_link.get(&sat_id);
-                            let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + _isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
-                            
+                            // Bitrate actually delivered to the ground network by this satellite
+                            let total_speed = sat_rate.get(&sat_id).copied().unwrap_or(0.0);
+
                             let color = if total_speed > 50.0 {
                                 egui::Color32::from_rgb(34, 197, 94)
                             } else if total_speed > 0.0 {
@@ -2678,10 +2629,14 @@ impl eframe::App for HydronGuiApp {
                 }
             }
 
-            // Draw active laser links between Satellites and their best Ground Station (SGL)
+            // Draw active laser links between Satellites and their allocated Ground
+            // Station (SGL) as computed by the routing pass, so the map matches the HUDs.
             if self.show_sgl {
-                for (_sat_id, _type, sat_pos_px, sat_r, sat_rot_z, _, _) in &satellites_screen {
-                    if self.prioritize_relay && _type == &OrbitType::LEO {
+                for (sat_id, _type, sat_pos_px, _sat_r, sat_rot_z, _, _) in &satellites_screen {
+                    let Some(&(gs_idx, alloc)) = sat_sgl_draw.get(sat_id) else {
+                        continue;
+                    };
+                    if gs_idx >= stations_screen.len() || alloc <= 0.0 {
                         continue;
                     }
                     let sat_max_speed = match _type {
@@ -2689,32 +2644,12 @@ impl eframe::App for HydronGuiApp {
                         OrbitType::MEO => self.meo_max_bitrate,
                         OrbitType::GEO => self.geo_max_bitrate,
                     };
+                    let (_gs_id, gs_pos_px, _gs_r, _gs_k, gs_rot_z) = &stations_screen[gs_idx];
+                    let best_gs_pos_px = *gs_pos_px;
+                    let best_gs_rot_z = *gs_rot_z;
+                    let max_capacity = alloc;
 
-                    let mut best_gs: Option<String> = None;
-                    let mut max_capacity = 0.0;
-                    let mut best_gs_pos_px = egui::pos2(0.0, 0.0);
-                    let mut best_gs_rot_z = 0.0;
-                    let sat_ref_dist = match _type {
-                        OrbitType::LEO => self.config.ref_dist_sgl_km,
-                        OrbitType::MEO => self.config.meo_alt_km,
-                        OrbitType::GEO => self.config.geo_alt_km,
-                    };
-
-                    for (gs_id, gs_pos_px, gs_r, gs_k, gs_rot_z) in &stations_screen {
-                        let capacity = compute_link_capacity(
-                            *sat_r, *gs_r, true, *gs_k,
-                            sat_ref_dist, sat_max_speed, &self.config.env
-                        ).min(sat_max_speed);
-
-                        if capacity > max_capacity {
-                            max_capacity = capacity;
-                            best_gs = Some(gs_id.clone());
-                            best_gs_pos_px = *gs_pos_px;
-                            best_gs_rot_z = *gs_rot_z;
-                        }
-                    }
-
-                    if best_gs.is_some() && max_capacity > 0.0 {
+                    {
                         let (beam_r, beam_g, beam_b) = if max_capacity > (sat_max_speed * 0.5) {
                             (0u8, 255u8, 170u8)
                         } else if max_capacity > (sat_max_speed * 0.1) {
@@ -2726,7 +2661,7 @@ impl eframe::App for HydronGuiApp {
                         let sat_dist = sat_pos_px.distance(center);
                         let sat_occluded = *sat_rot_z < 0.0 && sat_dist < earth_radius_px;
                         let gs_occluded = best_gs_rot_z <= 0.0;
-                        
+
                         let base_alpha = if sat_occluded || gs_occluded { 15 } else { 255 };
                         let glow1_alpha = if sat_occluded || gs_occluded { 5 } else { 25 };
                         let glow2_alpha = if sat_occluded || gs_occluded { 10 } else { 60 };
@@ -2755,7 +2690,7 @@ impl eframe::App for HydronGuiApp {
                             let progress = (pulse_t as f32 + p_idx as f32 * 0.5) % 1.0;
                             let px = sat_pos_px.x + (best_gs_pos_px.x - sat_pos_px.x) * progress;
                             let py = sat_pos_px.y + (best_gs_pos_px.y - sat_pos_px.y) * progress;
-                            
+
                             painter.circle_filled(
                                 egui::pos2(px, py),
                                 2.5,
@@ -3054,6 +2989,8 @@ pub fn default_config() -> Config {
         dt_time_step: 1.0,
         ref_dist_isl_km: 1000.0,
         ref_dist_sgl_km: 1000.0,
+        pointing_ref_mrad: 5.0,
+        adcs: AdcsConfig::default(),
     }
 }
 
