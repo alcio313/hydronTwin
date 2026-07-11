@@ -1411,6 +1411,146 @@ impl eframe::App for HydronGuiApp {
                             });
                         });
 
+                        ui.group(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("🛠️ CUSTOM ITEMS").strong().color(egui::Color32::LIGHT_BLUE));
+                                
+                                let r_earth = self.config.env.r_earth;
+                                let mut custom_sats = Vec::new();
+                                for (seg_idx, seg) in self.constellation.segments.iter().enumerate() {
+                                    if seg_idx < 3 {
+                                        for sat in &seg.satellites {
+                                            if sat.is_custom {
+                                                let r = sat.r;
+                                                let v = sat.v;
+                                                let r_mag = (r[0]*r[0] + r[1]*r[1] + r[2]*r[2]).sqrt();
+                                                let alt_km = (r_mag - r_earth) / 1000.0;
+                                                
+                                                let h_x = r[1]*v[2] - r[2]*v[1];
+                                                let h_y = r[2]*v[0] - r[0]*v[2];
+                                                let h_z = r[0]*v[1] - r[1]*v[0];
+                                                let h_mag = (h_x*h_x + h_y*h_y + h_z*h_z).sqrt();
+                                                let inc_deg = if h_mag > 1e-9 {
+                                                    (h_z / h_mag).acos().to_degrees()
+                                                } else {
+                                                    0.0
+                                                };
+                                                custom_sats.push((seg_idx, sat.id.clone(), alt_km, inc_deg, sat.mass, sat.area));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let mut custom_consts = Vec::new();
+                                for i in 3..self.constellation.segments.len() {
+                                    let seg = &self.constellation.segments[i];
+                                    let const_name = if let Some(first_sat) = seg.satellites.first() {
+                                        if let Some(pos) = first_sat.id.rfind('_') {
+                                            first_sat.id[..pos].to_string()
+                                        } else {
+                                            first_sat.id.clone()
+                                        }
+                                    } else {
+                                        format!("Const_{}", i)
+                                    };
+                                    
+                                    let (alt_km, inc_deg, mass, area) = if let Some(sat) = seg.satellites.first() {
+                                        let r = sat.r;
+                                        let v = sat.v;
+                                        let r_mag = (r[0]*r[0] + r[1]*r[1] + r[2]*r[2]).sqrt();
+                                        let alt = (r_mag - r_earth) / 1000.0;
+                                        let h_x = r[1]*v[2] - r[2]*v[1];
+                                        let h_y = r[2]*v[0] - r[0]*v[2];
+                                        let h_z = r[0]*v[1] - r[1]*v[0];
+                                        let h_mag = (h_x*h_x + h_y*h_y + h_z*h_z).sqrt();
+                                        let inc = if h_mag > 1e-9 {
+                                            (h_z / h_mag).acos().to_degrees()
+                                        } else {
+                                            0.0
+                                        };
+                                        (alt, inc, sat.mass, sat.area)
+                                    } else {
+                                        (0.0, 0.0, 0.0, 0.0)
+                                    };
+                                    custom_consts.push((i, const_name, seg.satellites.len(), alt_km, inc_deg, mass, area));
+                                }
+
+                                if custom_sats.is_empty() && custom_consts.is_empty() {
+                                    ui.label(egui::RichText::new("None").weak().italics());
+                                } else {
+                                    egui::ScrollArea::vertical()
+                                        .id_source("custom_items_scroll")
+                                        .max_height(80.0)
+                                        .show(ui, |ui| {
+                                            let mut sat_to_remove = None;
+                                            for &(seg_idx, ref sat_id, alt, inc, mass, area) in &custom_sats {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(format!("🛰️ {} ({:.0}km, {:.1}°, {:.0}kg, {:.2}m²)", sat_id, alt, inc, mass, area));
+                                                    if ui.button(egui::RichText::new("❌").color(egui::Color32::LIGHT_RED)).on_hover_text("Rimuovi satellite custom").clicked() {
+                                                        sat_to_remove = Some((seg_idx, sat_id.clone()));
+                                                    }
+                                                });
+                                            }
+                                            if let Some((seg_idx, sat_id)) = sat_to_remove {
+                                                if let Some(pos) = self.constellation.segments[seg_idx].satellites.iter().position(|s| s.id == sat_id) {
+                                                    self.constellation.segments[seg_idx].satellites.remove(pos);
+                                                    match seg_idx {
+                                                        0 => {
+                                                            if self.config.leo_num > 0 { self.config.leo_num -= 1; }
+                                                            self.leo_num_input = self.config.leo_num;
+                                                        }
+                                                        1 => {
+                                                            if self.config.meo_num > 0 { self.config.meo_num -= 1; }
+                                                            self.meo_num_input = self.config.meo_num;
+                                                        }
+                                                        2 => {
+                                                            if self.config.geo_num > 0 { self.config.geo_num -= 1; }
+                                                            self.geo_num_input = self.config.geo_num;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                    if self.selected_satellite_id == sat_id {
+                                                        self.selected_satellite_id = "None".to_string();
+                                                        self.update_input_fields_for_selected();
+                                                    }
+                                                    self.log(&format!("Removed custom satellite: {}", sat_id));
+                                                }
+                                            }
+
+                                            let mut const_to_remove = None;
+                                            for &(seg_idx, ref const_name, sat_count, alt, inc, mass, area) in &custom_consts {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(format!("🌌 {} ({}sats, {:.0}km, {:.1}°, {:.0}kg, {:.2}m²)", const_name, sat_count, alt, inc, mass, area));
+                                                    if ui.button(egui::RichText::new("❌").color(egui::Color32::LIGHT_RED)).on_hover_text("Rimuovi costellazione custom").clicked() {
+                                                        const_to_remove = Some(seg_idx);
+                                                    }
+                                                });
+                                            }
+                                            if let Some(seg_idx) = const_to_remove {
+                                                let seg = self.constellation.segments.remove(seg_idx);
+                                                for sat in &seg.satellites {
+                                                    if self.selected_satellite_id == sat.id {
+                                                        self.selected_satellite_id = "None".to_string();
+                                                        self.update_input_fields_for_selected();
+                                                    }
+                                                }
+                                                let const_name = if let Some(first_sat) = seg.satellites.first() {
+                                                    if let Some(pos) = first_sat.id.rfind('_') {
+                                                        first_sat.id[..pos].to_string()
+                                                    } else {
+                                                        first_sat.id.clone()
+                                                    }
+                                                } else {
+                                                    "Custom Constellation".to_string()
+                                                };
+                                                self.log(&format!("Removed custom constellation: {}", const_name));
+                                            }
+                                        });
+                                }
+                            });
+                        });
+
+
                         // Check for changes to apply configuration dynamically
                         let changed = self.config.leo_num != self.leo_num_input
                             || self.config.leo_alt_km != self.leo_alt_input
@@ -1857,50 +1997,44 @@ impl eframe::App for HydronGuiApp {
                             ui.group(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new("PHYSICAL EDIT").strong().color(egui::Color32::LIGHT_BLUE));
-                                    ui.horizontal(|ui| {
-                                        ui.add(egui::Slider::new(&mut self.sat_mass_input, 1.0..=500.0).text("Mass (kg)"));
-                                        ui.add(egui::Slider::new(&mut self.sat_cd_input, 0.0..=4.0).text("Cd"));
-                                        ui.add(egui::Slider::new(&mut self.sat_cr_input, 0.0..=3.0).text("Cr"));
-                                        if ui.button("Apply Parameters").clicked() {
-                                            let id = self.selected_satellite_id.clone();
-                                            for seg in &mut self.constellation.segments {
-                                                for s in &mut seg.satellites {
-                                                    if s.id == id {
-                                                        s.mass = self.sat_mass_input;
-                                                        s.cd = self.sat_cd_input;
-                                                        s.cr = self.sat_cr_input;
-                                                    }
+                                    ui.add(egui::Slider::new(&mut self.sat_mass_input, 1.0..=500.0).text("Mass (kg)"));
+                                    ui.add(egui::Slider::new(&mut self.sat_cd_input, 0.0..=4.0).text("Cd"));
+                                    ui.add(egui::Slider::new(&mut self.sat_cr_input, 0.0..=3.0).text("Cr"));
+                                    if ui.button("Apply Parameters").clicked() {
+                                        let id = self.selected_satellite_id.clone();
+                                        for seg in &mut self.constellation.segments {
+                                            for s in &mut seg.satellites {
+                                                if s.id == id {
+                                                    s.mass = self.sat_mass_input;
+                                                    s.cd = self.sat_cd_input;
+                                                    s.cr = self.sat_cr_input;
                                                 }
                                             }
-                                            self.log(&format!("Updated physical params for satellite {}", id));
                                         }
-                                    });
+                                        self.log(&format!("Updated physical params for satellite {}", id));
+                                    }
                                 });
                             });
 
                             ui.group(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new("DISTURBANCE TORQUE").strong().color(egui::Color32::LIGHT_BLUE));
-                                    ui.horizontal(|ui| {
-                                        ui.add(egui::Slider::new(&mut self.disturbance_val[0], -10.0..=10.0).text("Tx"));
-                                        ui.add(egui::Slider::new(&mut self.disturbance_val[1], -10.0..=10.0).text("Ty"));
-                                        ui.add(egui::Slider::new(&mut self.disturbance_val[2], -10.0..=10.0).text("Tz"));
-                                        if ui.button("⚡ Inject Torque").clicked() {
-                                            self.force_disturbance = true;
-                                        }
-                                    });
+                                    ui.add(egui::Slider::new(&mut self.disturbance_val[0], -10.0..=10.0).text("Tx"));
+                                    ui.add(egui::Slider::new(&mut self.disturbance_val[1], -10.0..=10.0).text("Ty"));
+                                    ui.add(egui::Slider::new(&mut self.disturbance_val[2], -10.0..=10.0).text("Tz"));
+                                    if ui.button("⚡ Inject Torque").clicked() {
+                                        self.force_disturbance = true;
+                                    }
                                 });
                             });
 
                             ui.group(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new("SENSOR NOISE").strong().color(egui::Color32::LIGHT_BLUE));
-                                    ui.horizontal(|ui| {
-                                        ui.add(egui::Slider::new(&mut self.gyro_noise, 1e-7..=1e-3).logarithmic(true).text("Gyro"));
-                                        ui.add(egui::Slider::new(&mut self.mag_noise, 1e-9..=1e-5).logarithmic(true).text("Mag"));
-                                        ui.add(egui::Slider::new(&mut self.sun_noise, 1e-5..=1e-1).logarithmic(true).text("Sun"));
-                                        ui.add(egui::Slider::new(&mut self.st_noise, 1e-6..=1e-2).logarithmic(true).text("Star"));
-                                    });
+                                    ui.add(egui::Slider::new(&mut self.gyro_noise, 1e-7..=1e-3).logarithmic(true).text("Gyro"));
+                                    ui.add(egui::Slider::new(&mut self.mag_noise, 1e-9..=1e-5).logarithmic(true).text("Mag"));
+                                    ui.add(egui::Slider::new(&mut self.sun_noise, 1e-5..=1e-1).logarithmic(true).text("Sun"));
+                                    ui.add(egui::Slider::new(&mut self.st_noise, 1e-6..=1e-2).logarithmic(true).text("Star"));
                                 });
                             });
                     }
@@ -2352,19 +2486,19 @@ impl eframe::App for HydronGuiApp {
                 let y = -pos[1]; // Invert Y to correct longitude coordinate system orientation
                 let z = pos[2];
 
-                // 1. Rotate around Y-axis by map_yaw
+                // 1. Rotate around Z-axis (North-South axis) by map_yaw
                 let cos_yaw = (map_yaw as f64).cos();
                 let sin_yaw = (map_yaw as f64).sin();
-                let x1 = x * cos_yaw - z * sin_yaw;
-                let z1 = x * sin_yaw + z * cos_yaw;
-                let y1 = y;
+                let x1 = x * cos_yaw - y * sin_yaw;
+                let y1 = x * sin_yaw + y * cos_yaw;
+                let z1 = z;
 
                 // 2. Rotate around X-axis by map_pitch
                 let cos_pitch = (map_pitch as f64).cos();
                 let sin_pitch = (map_pitch as f64).sin();
                 let x2 = x1;
-                let y2 = y1 * cos_pitch - z1 * sin_pitch;
-                let z2 = y1 * sin_pitch + z1 * cos_pitch; // positive is towards camera
+                let y2 = -z1 * cos_pitch + y1 * sin_pitch;
+                let z2 = z1 * sin_pitch + y1 * cos_pitch; // positive is towards camera
 
                 // 3. Screen projection
                 let screen_x = center.x + (x2 * scale) as f32;
@@ -2579,16 +2713,42 @@ impl eframe::App for HydronGuiApp {
                 );
             }
 
-            // Draw Orbit paths
-            let draw_orbit_3d = |painter: &egui::Painter, r: f64, color: egui::Color32| {
+            // Draw Orbit paths dynamically from satellite parameters
+            let draw_orbit_from_sat = |painter: &egui::Painter, sat: &Satellite, color: egui::Color32| {
+                let r = sat.r;
+                let v = sat.v;
+                let r_mag = (r[0]*r[0] + r[1]*r[1] + r[2]*r[2]).sqrt();
+                let h_x = r[1]*v[2] - r[2]*v[1];
+                let h_y = r[2]*v[0] - r[0]*v[2];
+                let h_z = r[0]*v[1] - r[1]*v[0];
+                let h_mag = (h_x*h_x + h_y*h_y + h_z*h_z).sqrt();
+                if h_mag < 1e-9 {
+                    return;
+                }
+                let c_i = h_z / h_mag;
+                let s_i = (1.0 - c_i*c_i).max(0.0).sqrt();
+                
+                // Node vector: n = k x h = [-h_y, h_x, 0]
+                let n_x = -h_y;
+                let n_y = h_x;
+                let n_mag = (n_x*n_x + n_y*n_y).sqrt();
+                let (c_r, s_r) = if n_mag > 1e-9 {
+                    (n_x / n_mag, n_y / n_mag)
+                } else {
+                    (1.0, 0.0)
+                };
+                
                 let mut prev_pt: Option<egui::Pos2> = None;
                 let steps = 120;
                 for step in 0..=steps {
                     let theta = (step as f64 * 360.0 / steps as f64).to_radians();
-                    let x = r * theta.cos();
-                    let y = r * theta.sin();
-                    let z = 0.0;
-                    let (screen_pos, rot_z) = project_3d([x, y, z]);
+                    let r_plane = [r_mag * theta.cos(), r_mag * theta.sin(), 0.0];
+                    let r_eci = [
+                        c_r * r_plane[0] - s_r * c_i * r_plane[1],
+                        s_r * r_plane[0] + c_r * c_i * r_plane[1],
+                        s_i * r_plane[1]
+                    ];
+                    let (screen_pos, rot_z) = project_3d(r_eci);
                     
                     let dist = screen_pos.distance(center);
                     let occluded = rot_z < 0.0 && dist < earth_radius_px;
@@ -2606,14 +2766,44 @@ impl eframe::App for HydronGuiApp {
                 }
             };
 
-            let leo_r = self.config.env.r_earth + self.config.leo_alt_km * 1000.0;
-            draw_orbit_3d(&painter, leo_r, egui::Color32::from_rgb(56, 189, 248));
-            
-            let meo_r = self.config.env.r_earth + self.config.meo_alt_km * 1000.0;
-            draw_orbit_3d(&painter, meo_r, egui::Color32::from_rgb(192, 132, 252));
-            
-            let geo_r = self.config.env.r_earth + self.config.geo_alt_km * 1000.0;
-            draw_orbit_3d(&painter, geo_r, egui::Color32::from_rgb(251, 146, 60));
+            // 1. Draw orbits of all segments using their first satellite
+            for (seg_idx, seg) in self.constellation.segments.iter().enumerate() {
+                let color = match seg_idx {
+                    0 => egui::Color32::from_rgb(56, 189, 248),  // LEO Blue
+                    1 => egui::Color32::from_rgb(192, 132, 252), // MEO Purple
+                    2 => egui::Color32::from_rgb(251, 146, 60),  // GEO Orange
+                    _ => {
+                        if let Some(first_sat) = seg.satellites.first() {
+                            if let Some(color_rgb) = first_sat.custom_color {
+                                egui::Color32::from_rgb(color_rgb[0], color_rgb[1], color_rgb[2])
+                            } else {
+                                egui::Color32::from_rgb(34, 197, 94)
+                            }
+                        } else {
+                            egui::Color32::from_rgb(34, 197, 94)
+                        }
+                    }
+                };
+                if let Some(first_sat) = seg.satellites.first() {
+                    draw_orbit_from_sat(&painter, first_sat, color);
+                }
+            }
+
+            // 2. Draw orbits of individual custom satellites in LEO/MEO/GEO segments
+            for seg_idx in 0..3 {
+                if seg_idx < self.constellation.segments.len() {
+                    for sat in &self.constellation.segments[seg_idx].satellites {
+                        if sat.is_custom {
+                            let color = if let Some(color_rgb) = sat.custom_color {
+                                egui::Color32::from_rgb(color_rgb[0], color_rgb[1], color_rgb[2])
+                            } else {
+                                egui::Color32::from_rgb(34, 197, 94)
+                            };
+                            draw_orbit_from_sat(&painter, sat, color);
+                        }
+                    }
+                }
+            }
 
             // Gather all active node screen positions
             let mut satellites_screen = Vec::new();
