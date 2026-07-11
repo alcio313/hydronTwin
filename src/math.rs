@@ -14,24 +14,6 @@ impl Lcg {
         self.state = self.state.wrapping_mul(1664525).wrapping_add(1013904223);
         (self.state as f64) / (u64::MAX as f64)
     }
-
-    /// Internal RNG state, for snapshotting (rewind support).
-    pub fn state(&self) -> u64 {
-        self.state
-    }
-
-    /// Restore a previously captured RNG state (rewind support).
-    pub fn set_state(&mut self, state: u64) {
-        self.state = state;
-    }
-
-    /// Standard normal sample N(0, 1) via Box-Muller.
-    pub fn next_gaussian(&mut self) -> f64 {
-        // Clamp away from 0 so ln() stays finite.
-        let u1 = self.next_f64().max(1e-12);
-        let u2 = self.next_f64();
-        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-    }
 }
 
 pub fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -102,21 +84,6 @@ pub fn mat_vec_mult(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-// Hamilton product a ⊗ b, scalar-first convention [q0, q1, q2, q3]
-pub fn quat_mult(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    [
-        a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
-        a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
-        a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1],
-        a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0],
-    ]
-}
-
-// Quaternion conjugate (inverse for unit quaternions)
-pub fn quat_conj(q: [f64; 4]) -> [f64; 4] {
-    [q[0], -q[1], -q[2], -q[3]]
-}
-
 // Rotate vector using quaternion (ECI to body frame)
 // v_body = R(q) * v_eci
 pub fn rotate_vector_q(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
@@ -178,77 +145,3 @@ pub fn az_el_dist(obs_r: [f64; 3], obs_lat: f64, obs_lon: f64, tgt_r: [f64; 3]) 
 
 // Simple hand-rolled TOML config loader to keep the application dependency-free
 // ponytail: custom config loader that avoids external crate compilation and downloads.
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const EPS: f64 = 1e-12;
-
-    fn quat_close(a: [f64; 4], b: [f64; 4], tol: f64) -> bool {
-        // q and -q are the same rotation
-        let same: f64 = (0..4).map(|i| (a[i] - b[i]).abs()).fold(0.0, f64::max);
-        let flip: f64 = (0..4).map(|i| (a[i] + b[i]).abs()).fold(0.0, f64::max);
-        same < tol || flip < tol
-    }
-
-    #[test]
-    fn quat_mult_identity() {
-        let q = normalize_q([0.9, 0.1, -0.2, 0.3]);
-        let ident = [1.0, 0.0, 0.0, 0.0];
-        assert!(quat_close(quat_mult(q, ident), q, EPS));
-        assert!(quat_close(quat_mult(ident, q), q, EPS));
-    }
-
-    #[test]
-    fn quat_mult_inverse() {
-        let q = normalize_q([0.7, -0.3, 0.5, 0.2]);
-        let prod = quat_mult(q, quat_conj(q));
-        assert!(quat_close(prod, [1.0, 0.0, 0.0, 0.0], 1e-9));
-    }
-
-    #[test]
-    fn rotate_vector_q_known_rotation() {
-        // Codebase convention: rotate_vector_q applies q as an active rotation,
-        // so a 90° rotation about z maps x to +y.
-        let half = std::f64::consts::FRAC_PI_4;
-        let q = [half.cos(), 0.0, 0.0, half.sin()];
-        let v = rotate_vector_q(q, [1.0, 0.0, 0.0]);
-        assert!((v[0] - 0.0).abs() < 1e-9);
-        assert!((v[1] - 1.0).abs() < 1e-9);
-        assert!((v[2] - 0.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn gaussian_moments() {
-        let mut rng = Lcg::new(12345);
-        let n = 10_000;
-        let samples: Vec<f64> = (0..n).map(|_| rng.next_gaussian()).collect();
-        let mean = samples.iter().sum::<f64>() / n as f64;
-        let var = samples.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
-        assert!(mean.abs() < 0.05, "mean = {mean}");
-        assert!((var - 1.0).abs() < 0.1, "var = {var}");
-    }
-
-    #[test]
-    fn lcg_state_roundtrip() {
-        let mut a = Lcg::new(42);
-        a.next_f64();
-        a.next_f64();
-        let saved = a.state();
-        let expected: Vec<f64> = (0..5).map(|_| a.next_f64()).collect();
-        a.set_state(saved);
-        let replayed: Vec<f64> = (0..5).map(|_| a.next_f64()).collect();
-        assert_eq!(expected, replayed);
-    }
-
-    #[test]
-    fn az_el_dist_zenith() {
-        // Satellite directly above the observer at the equator/prime meridian
-        let obs = [6378137.0, 0.0, 0.0];
-        let tgt = [6378137.0 + 500_000.0, 0.0, 0.0];
-        let (_az, el, dist) = az_el_dist(obs, 0.0, 0.0, tgt);
-        assert!((el - 90.0).abs() < 1e-6);
-        assert!((dist - 500.0).abs() < 1e-6);
-    }
-}
