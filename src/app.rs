@@ -363,7 +363,6 @@ impl HydronGuiApp {
         let step_size = 10.0; // 10s steps for excellent resolution
         let mut current_time = 0.0;
 
-        let sun_vector = [1.0, 0.0, 0.0];
         let noise = self.adcs_noise();
         let mut rng = Lcg::new(99);
 
@@ -379,6 +378,7 @@ impl HydronGuiApp {
             }
 
             // 2. Step satellite dynamics with the closed-loop ADCS controller
+            let sun_vector = sun_direction(current_time);
             let gst_now = current_time * 7.292115e-5;
             for segment in &mut constellation.segments {
                 for sat in &mut segment.satellites {
@@ -882,7 +882,7 @@ impl eframe::App for HydronGuiApp {
 
             for _ in 0..loops {
                 self.current_time += dt;
-                let sun_vector = [1.0, 0.0, 0.0];
+                let sun_vector = sun_direction(self.current_time);
                 let gst_now = self.current_time * 7.292115e-5;
 
                 // Step atmosphere
@@ -1131,7 +1131,7 @@ impl eframe::App for HydronGuiApp {
                                     if ui.button("⏭ Step").clicked() {
                                         self.is_running = false;
                                         self.current_time += self.step_size;
-                                        let sun_vector = [1.0, 0.0, 0.0];
+                                        let sun_vector = sun_direction(self.current_time);
                                         let gst_now = self.current_time * 7.292115e-5;
                                         for gs in &mut self.ground_stations {
                                             step_atmosphere(gs, &mut self.atmos_model);

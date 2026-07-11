@@ -54,12 +54,14 @@ pub fn step_orbit(sat: &mut Satellite, dt: f64, env: &SimEnvironment, sun_vector
             a = add(a, a_drag);
         }
 
-        // 3. Solar Radiation Pressure (SRP)
+        // 3. Solar Radiation Pressure (SRP) — zero while in Earth's shadow
         if env.p_srp > 0.0 {
             // s_hat is the unit sun direction vector
             let s_hat = normalize(sun_vector);
-            let a_srp = scale(s_hat, env.p_srp * cr * area / mass);
-            a = add(a, a_srp);
+            if !in_earth_shadow(r_vec, s_hat, env.r_earth) {
+                let a_srp = scale(s_hat, env.p_srp * cr * area / mass);
+                a = add(a, a_srp);
+            }
         }
 
         [v_vec[0], v_vec[1], v_vec[2], a[0], a[1], a[2]]
@@ -83,6 +85,34 @@ pub fn step_orbit(sat: &mut Satellite, dt: f64, env: &SimEnvironment, sun_vector
 
     sat.r = [state[0], state[1], state[2]];
     sat.v = [state[3], state[4], state[5]];
+}
+
+/// Unit vector from the Earth to the Sun in ECI at simulation time `t` (s).
+///
+/// Simplified circular ephemeris: the Sun moves along the ecliptic at the
+/// mean rate (2π/365.25 d) with obliquity 23.44°; t = 0 is the vernal equinox.
+pub fn sun_direction(t: f64) -> [f64; 3] {
+    const OBLIQUITY_RAD: f64 = 23.44 * std::f64::consts::PI / 180.0;
+    const YEAR_S: f64 = 365.25 * 86400.0;
+    let lambda = 2.0 * std::f64::consts::PI * t / YEAR_S;
+    let (sin_l, cos_l) = lambda.sin_cos();
+    let (sin_e, cos_e) = OBLIQUITY_RAD.sin_cos();
+    [cos_l, sin_l * cos_e, sin_l * sin_e]
+}
+
+/// Cylindrical Earth-shadow model: true when the satellite is on the anti-sun
+/// side and inside the shadow cylinder of radius r_earth.
+pub fn in_earth_shadow(r: [f64; 3], sun_hat: [f64; 3], r_earth: f64) -> bool {
+    let along = dot(r, sun_hat);
+    if along >= 0.0 {
+        return false; // Sun side of the terminator plane
+    }
+    let perp = [
+        r[0] - along * sun_hat[0],
+        r[1] - along * sun_hat[1],
+        r[2] - along * sun_hat[2],
+    ];
+    norm(perp) < r_earth
 }
 
 /// Earth magnetic field as a tilted dipole, in ECI coordinates (Tesla).
@@ -265,6 +295,37 @@ mod tests {
             "radius drifted by {} m over one period",
             (r_final - r0).abs()
         );
+    }
+
+    #[test]
+    fn sun_direction_seasonal_geometry() {
+        // Vernal equinox: Sun along +x.
+        let s0 = sun_direction(0.0);
+        assert!((s0[0] - 1.0).abs() < 1e-12 && s0[1].abs() < 1e-12 && s0[2].abs() < 1e-12);
+
+        // Summer solstice (quarter year): Sun in the y-z plane, tilted by the obliquity.
+        let quarter = 365.25 * 86400.0 / 4.0;
+        let s1 = sun_direction(quarter);
+        let eps = 23.44_f64.to_radians();
+        assert!(s1[0].abs() < 1e-9);
+        assert!((s1[1] - eps.cos()).abs() < 1e-9);
+        assert!((s1[2] - eps.sin()).abs() < 1e-9);
+        // Always a unit vector.
+        assert!((norm(s1) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn earth_shadow_predicate() {
+        let r_earth = 6378137.0;
+        let sun = [1.0, 0.0, 0.0];
+        // Directly behind the Earth (anti-sun): in shadow.
+        assert!(in_earth_shadow([-7e6, 0.0, 0.0], sun, r_earth));
+        // Sun side: never in shadow.
+        assert!(!in_earth_shadow([7e6, 0.0, 0.0], sun, r_earth));
+        // Anti-sun side but outside the shadow cylinder: lit.
+        assert!(!in_earth_shadow([-7e6, 7e6, 0.0], sun, r_earth));
+        // Anti-sun side, inside the cylinder at an offset below its radius: shadowed.
+        assert!(in_earth_shadow([-7e6, 3e6, 0.0], sun, r_earth));
     }
 
     #[test]
