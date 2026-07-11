@@ -378,7 +378,7 @@ mod tests {
                 point_factor: pointing_loss_factor(err, ref_rad),
             }];
             // Station straight below, no weather attenuation.
-            let gs = vec![GroundNode { r: [6378137.0, 0.0, 0.0], k_value: 0.0, capacity: f64::INFINITY }];
+            let gs = vec![GroundNode { r: [6378137.0, 0.0, 0.0], k_value: 0.0, capacity: f64::INFINITY, min_elev_rad: 0.0 }];
             route_network(&nodes, &gs, false, &env).sat_ground_rate[0]
         };
 

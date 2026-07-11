@@ -408,7 +408,7 @@ impl HydronGuiApp {
             // Shared routing pass (same allocation model as the live view)
             let (route_nodes, _pointing) = self.build_route_nodes(&constellation);
             let gs_nodes: Vec<GroundNode> = gs_eci_list.iter().zip(ground_stations.iter())
-                .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps })
+                .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps, min_elev_rad: self.config.min_elevation_deg.to_radians() })
                 .collect();
             let routing = route_network(&route_nodes, &gs_nodes, self.prioritize_relay, &self.config.env);
 
@@ -702,6 +702,7 @@ impl HydronGuiApp {
         toml.push_str(&format!("ref_distance_isl_km = {:.1}\n", c.ref_dist_isl_km));
         toml.push_str(&format!("ref_distance_sgl_km = {:.1}\n", c.ref_dist_sgl_km));
         toml.push_str(&format!("pointing_ref_mrad = {:.2}\n", c.pointing_ref_mrad));
+        toml.push_str(&format!("min_elevation_deg = {:.1}\n", c.min_elevation_deg));
 
         toml
     }
@@ -999,7 +1000,7 @@ impl eframe::App for HydronGuiApp {
         // current geometry (shared with the 24h exporter via route_network).
         let (route_nodes, sat_pointing) = self.build_route_nodes(&self.constellation);
         let gs_nodes: Vec<GroundNode> = gs_eci_list.iter().zip(self.ground_stations.iter())
-            .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps })
+            .map(|(r, gs)| GroundNode { r: *r, k_value: gs.k_value, capacity: gs.downlink_nominal_gbps, min_elev_rad: self.config.min_elevation_deg.to_radians() })
             .collect();
         let routing = route_network(&route_nodes, &gs_nodes, self.prioritize_relay, &self.config.env);
 
@@ -3055,6 +3056,7 @@ pub fn default_config() -> Config {
         ref_dist_isl_km: 1000.0,
         ref_dist_sgl_km: 1000.0,
         pointing_ref_mrad: 5.0,
+        min_elevation_deg: 5.0,
         adcs: AdcsConfig::default(),
     }
 }

@@ -109,3 +109,5 @@ ref_distance_isl_km = 1000.0
 ref_distance_sgl_km = 1000.0
 # Pointing error (mrad) at which a laser link loses 1/e of its capacity
 pointing_ref_mrad = 5.0
+# Minimum elevation (deg) for usable optical ground links
+min_elevation_deg = 5.0

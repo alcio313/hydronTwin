@@ -77,6 +77,8 @@ pub struct Config {
     pub ref_dist_sgl_km: f64,
     /// Reference pointing error (mrad) at which the laser link loses 1/e of its capacity.
     pub pointing_ref_mrad: f64,
+    /// Minimum elevation (deg) for usable optical ground links.
+    pub min_elevation_deg: f64,
     pub adcs: AdcsConfig,
 }
 
@@ -131,6 +133,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut ref_dist_isl_km = 1000.0;
     let mut ref_dist_sgl_km = 1000.0;
     let mut pointing_ref_mrad = 5.0;
+    let mut min_elevation_deg = 5.0;
     let mut adcs = AdcsConfig::default();
 
     let mut current_section = String::new();
@@ -278,6 +281,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
                         "ref_distance_isl_km" => ref_dist_isl_km = val.parse().unwrap_or(ref_dist_isl_km),
                         "ref_distance_sgl_km" => ref_dist_sgl_km = val.parse().unwrap_or(ref_dist_sgl_km),
                         "pointing_ref_mrad" => pointing_ref_mrad = val.parse().unwrap_or(pointing_ref_mrad),
+                        "min_elevation_deg" => min_elevation_deg = val.parse().unwrap_or(min_elevation_deg),
                         _ => {}
                     }
                 }
@@ -366,6 +370,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
         ref_dist_isl_km,
         ref_dist_sgl_km,
         pointing_ref_mrad,
+        min_elevation_deg,
         adcs,
     })
 }

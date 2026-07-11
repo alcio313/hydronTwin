@@ -27,6 +27,8 @@ pub struct GroundNode {
     pub k_value: f64,
     /// Aggregate downlink capacity (Gbps); may be infinite.
     pub capacity: f64,
+    /// Minimum elevation (rad) below which optical links are unusable.
+    pub min_elev_rad: f64,
 }
 
 /// Output of one routing/allocation pass over the current geometry.
@@ -71,8 +73,21 @@ fn isl_capacity(nodes: &[RouteNode], a: usize, b: usize, env: &SimEnvironment) -
 }
 
 /// Physical SGL link capacity between a satellite and a ground station,
-/// including the satellite's pointing loss and its payload cap.
+/// including the satellite's pointing loss, its payload cap, and the
+/// station's minimum elevation mask.
 fn sgl_capacity(node: &RouteNode, gs: &GroundNode, env: &SimEnvironment) -> f64 {
+    // Elevation of the satellite as seen from the station:
+    // sin(el) = up_hat · range_hat, with up along the station's zenith.
+    let d = [node.r[0] - gs.r[0], node.r[1] - gs.r[1], node.r[2] - gs.r[2]];
+    let d_len = norm(d);
+    let gs_len = norm(gs.r);
+    if d_len <= 0.0 || gs_len <= 0.0 {
+        return 0.0;
+    }
+    let sin_el = dot(gs.r, d) / (gs_len * d_len);
+    if sin_el < gs.min_elev_rad.sin() {
+        return 0.0;
+    }
     compute_link_capacity(node.r, gs.r, true, gs.k_value, node.sgl_ref_dist, node.max_cap, env)
         .min(node.max_cap)
         * node.point_factor
@@ -458,7 +473,7 @@ mod tests {
     }
 
     fn gs_at_x(capacity: f64) -> GroundNode {
-        GroundNode { r: [R_EARTH, 0.0, 0.0], k_value: 0.0, capacity }
+        GroundNode { r: [R_EARTH, 0.0, 0.0], k_value: 0.0, capacity, min_elev_rad: 0.0 }
     }
 
     #[test]
@@ -474,6 +489,25 @@ mod tests {
         assert!(visible_sgl(a, [R_EARTH, 0.0, 0.0], R_EARTH));
         // Satellite behind the planet from the GS
         assert!(!visible_sgl(c, [R_EARTH, 0.0, 0.0], R_EARTH));
+    }
+
+    #[test]
+    fn elevation_mask_blocks_low_links() {
+        let env = test_env();
+        let mut gs = gs_at_x(f64::INFINITY);
+        gs.min_elev_rad = 10.0_f64.to_radians();
+        // Satellite ~8.5° above the station's horizon: geometrically visible
+        // but below the 10° mask.
+        let low_sat = node([R_EARTH + 300_000.0, 2_000_000.0, 0.0], false, 40.0);
+        let res = route_network(&[low_sat], &[gs], false, &env);
+        assert_eq!(res.sat_ground_rate[0], 0.0, "link below the elevation mask must be unusable");
+
+        // Same satellite straight overhead: well above the mask.
+        let mut gs = gs_at_x(f64::INFINITY);
+        gs.min_elev_rad = 10.0_f64.to_radians();
+        let high_sat = node([R_EARTH + 300_000.0, 0.0, 0.0], false, 40.0);
+        let res = route_network(&[high_sat], &[gs], false, &env);
+        assert!(res.sat_ground_rate[0] > 0.0, "overhead link must pass the mask");
     }
 
     #[test]
