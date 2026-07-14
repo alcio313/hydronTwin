@@ -1280,11 +1280,17 @@ impl eframe::App for HydronGuiApp {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("CONTROL").strong().color(egui::Color32::LIGHT_BLUE));
                                 ui.horizontal(|ui| {
-                                    if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" }).clicked() {
+                                    if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" })
+                                        .on_hover_text("Avvia o sospende la simulazione in tempo reale")
+                                        .clicked()
+                                    {
                                         self.is_running = !self.is_running;
                                         self.log(if self.is_running { "Simulation Resumed" } else { "Simulation Paused" });
                                     }
-                                    if ui.button("⏭ Step").clicked() {
+                                    if ui.button("⏭ Step")
+                                        .on_hover_text("Avanza la simulazione di un singolo incremento temporale")
+                                        .clicked()
+                                    {
                                         self.is_running = false;
                                         self.current_time += self.step_size;
                                         let sun_vector = [1.0, 0.0, 0.0];
@@ -1300,7 +1306,10 @@ impl eframe::App for HydronGuiApp {
                                         }
                                         self.log("Single Step Executed");
                                     }
-                                    if ui.button("↺ Reset").clicked() {
+                                    if ui.button("↺ Reset")
+                                        .on_hover_text("Ripristina la simulazione allo stato iniziale")
+                                        .clicked()
+                                    {
                                         pending_reset = true;
                                     }
                                 });
@@ -1321,7 +1330,10 @@ impl eframe::App for HydronGuiApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("REPORTS").strong().color(egui::Color32::LIGHT_BLUE));
-                                if ui.button("📥 Esporta 24h CSV").clicked() {
+                                if ui.button("📥 Esporta 24h CSV")
+                                    .on_hover_text("Calcola ed esporta i dati di 24 ore in formato CSV")
+                                    .clicked()
+                                {
                                     match self.run_and_export_24h() {
                                         Ok(file) => {
                                             self.log(&format!("Dati di 24h esportati in '{}'", file));
@@ -2111,7 +2123,10 @@ impl eframe::App for HydronGuiApp {
                                                                 self.ground_stations[i].alt_m = 100.0;
                                                             }
                                                         }
-                                                        if ui.button("❌").clicked() {
+                                                        if ui.button(egui::RichText::new("❌").color(egui::Color32::LIGHT_RED))
+                                                            .on_hover_text("Rimuovi stazione di terra")
+                                                            .clicked()
+                                                        {
                                                             to_remove = Some(i);
                                                         }
                                                     });

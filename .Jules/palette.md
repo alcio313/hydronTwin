@@ -1,0 +1,3 @@
+## 2025-02-13 - Destructive Action Visual Styling and Tooltip Consistency
+**Learning:** Destructive actions (like removing ground stations, satellites, or custom constellations) must use red-colored text via `egui::RichText::new(...).color(egui::Color32::LIGHT_RED)` to visually communicate the significance of the operation, paired with `.on_hover_text(...)` to provide accessible descriptions and screen-reader context in the `egui` framework.
+**Action:** Always check the codebase for other instances of icon-only or destructive buttons and ensure they are appropriately styled with visual cues and tooltips to maintain UI accessibility and consistency.
