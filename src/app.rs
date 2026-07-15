@@ -2111,9 +2111,17 @@ impl eframe::App for HydronGuiApp {
                                                                 self.ground_stations[i].alt_m = 100.0;
                                                             }
                                                         }
-                                                        if ui.button("❌").clicked() {
-                                                            to_remove = Some(i);
-                                                        }
+                                                        ui.add_enabled_ui(self.ground_stations.len() > 1, |ui| {
+                                                            let btn = ui.button(egui::RichText::new("❌").color(egui::Color32::LIGHT_RED));
+                                                            let btn = if self.ground_stations.len() > 1 {
+                                                                btn.on_hover_text("Remove this ground station")
+                                                            } else {
+                                                                btn.on_hover_text("Cannot remove the only remaining ground station")
+                                                            };
+                                                            if btn.clicked() {
+                                                                to_remove = Some(i);
+                                                            }
+                                                        });
                                                     });
                                                     let mut lat_deg = self.ground_stations[i].lat_rad.to_degrees();
                                                     let mut lon_deg = self.ground_stations[i].lon_rad.to_degrees();
@@ -2134,7 +2142,7 @@ impl eframe::App for HydronGuiApp {
                                         if let Some(idx) = to_remove {
                                             pending_remove = Some(idx);
                                         }
-                                        if ui.button("➕ Add Station").clicked() {
+                                        if ui.button("➕ Add Station").on_hover_text("Add a new ground station").clicked() {
                                             pending_add = true;
                                         }
                                     });

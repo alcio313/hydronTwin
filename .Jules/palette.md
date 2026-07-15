@@ -1,0 +1,5 @@
+# Palette's Critical UX/Accessibility Learning Journal
+
+## 2025-02-15 - Contextualizing Destructive Actions in Immediate-Mode GUIs
+**Learning:** In immediate-mode GUI frameworks (such as egui), destructive actions like removing critical simulation elements (e.g. ground stations) can easily be executed by accident if they lack standard warning visual cues and tooltips. Furthermore, leaving icon-only buttons like "❌" without descriptions makes the interface completely un-intuitive and inaccessible. Disabling elements when they would cause application-breaking state errors (e.g. deleting the last ground station) must always be paired with a tooltip explaining *why* the option is currently unavailable.
+**Action:** Always wrap destructive or conditional interactive components in accessibility container helpers like `ui.add_enabled_ui(...)` and append descriptive `.on_hover_text(...)` tooltips with color-coded styling (`Color32::LIGHT_RED`) to provide clear visual and informational affordances.
