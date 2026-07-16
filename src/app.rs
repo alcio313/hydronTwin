@@ -2111,9 +2111,18 @@ impl eframe::App for HydronGuiApp {
                                                                 self.ground_stations[i].alt_m = 100.0;
                                                             }
                                                         }
-                                                        if ui.button("❌").clicked() {
-                                                            to_remove = Some(i);
-                                                        }
+                                                        let has_multiple_gs = self.ground_stations.len() > 1;
+                                                        ui.add_enabled_ui(has_multiple_gs, |ui| {
+                                                            let btn = ui.button(egui::RichText::new("❌").color(egui::Color32::LIGHT_RED));
+                                                            let btn = if has_multiple_gs {
+                                                                btn.on_hover_text("Elimina questa stazione di terra dalla simulazione")
+                                                            } else {
+                                                                btn.on_hover_text("Impossibile eliminare: deve rimanere almeno una stazione di terra attiva")
+                                                            };
+                                                            if btn.clicked() {
+                                                                to_remove = Some(i);
+                                                            }
+                                                        });
                                                     });
                                                     let mut lat_deg = self.ground_stations[i].lat_rad.to_degrees();
                                                     let mut lon_deg = self.ground_stations[i].lon_rad.to_degrees();
