@@ -1,18 +1,18 @@
-mod models;
+mod app;
 mod config;
 mod math;
+mod models;
+mod network;
 mod physics;
 mod simulation;
-mod network;
-mod app;
 
-#[cfg(not(target_arch = "wasm32"))]
-use eframe::egui;
+use app::{HydronGuiApp, default_config};
 #[cfg(not(target_arch = "wasm32"))]
 use config::load_config;
 #[cfg(target_arch = "wasm32")]
 use config::parse_config_from_str;
-use app::{default_config, HydronGuiApp};
+#[cfg(not(target_arch = "wasm32"))]
+use eframe::egui;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -26,7 +26,10 @@ fn main() -> Result<(), eframe::Error> {
     let config = match load_config(config_path) {
         Ok(c) => c,
         Err(e) => {
-            println!("Warning: config.toml could not be loaded: {}. Loading defaults.", e);
+            println!(
+                "Warning: config.toml could not be loaded: {}. Loading defaults.",
+                e
+            );
             default_config()
         }
     };

@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone)]
 pub struct Lcg {
     state: u64,
@@ -56,9 +55,9 @@ pub fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
 
 // Quaternion normalization
 pub fn normalize_q(q: [f64; 4]) -> [f64; 4] {
-    let n = (q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]).sqrt();
+    let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
     if n > 0.0 {
-        [q[0]/n, q[1]/n, q[2]/n, q[3]/n]
+        [q[0] / n, q[1] / n, q[2] / n, q[3] / n]
     } else {
         [1.0, 0.0, 0.0, 0.0]
     }
@@ -68,19 +67,15 @@ pub fn normalize_q(q: [f64; 4]) -> [f64; 4] {
 pub fn eci_to_ecef_matrix(gst: f64) -> [[f64; 3]; 3] {
     let c = gst.cos();
     let s = gst.sin();
-    [
-        [c, s, 0.0],
-        [-s, c, 0.0],
-        [0.0, 0.0, 1.0],
-    ]
+    [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]]
 }
 
 // Matrix vector multiply
 pub fn mat_vec_mult(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
     [
-        m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2],
-        m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2],
-        m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2],
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
     ]
 }
 
@@ -89,7 +84,7 @@ pub fn mat_vec_mult(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
 pub fn rotate_vector_q(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
     let q_vec = [q[1], q[2], q[3]];
     let q_scalar = q[0];
-    
+
     // R(q) v = v + 2 * q_vec x (q_vec x v + q_scalar * v)
     let temp = add(cross(q_vec, v), scale(v, q_scalar));
     add(v, scale(cross(q_vec, temp), 2.0))
@@ -100,15 +95,15 @@ pub fn lla_to_ecef(lat_rad: f64, lon_rad: f64, alt_m: f64) -> [f64; 3] {
     let a = 6378137.0; // Equatorial radius (m)
     let f = 1.0 / 298.257223563; // Flattening
     let e2 = f * (2.0 - f);
-    
+
     let sin_lat = lat_rad.sin();
     let cos_lat = lat_rad.cos();
     let n = a / (1.0 - e2 * sin_lat * sin_lat).sqrt();
-    
+
     let x = (n + alt_m) * cos_lat * lon_rad.cos();
     let y = (n + alt_m) * cos_lat * lon_rad.sin();
     let z = (n * (1.0 - e2) + alt_m) * sin_lat;
-    
+
     [x, y, z]
 }
 
@@ -117,25 +112,31 @@ pub fn lla_to_ecef(lat_rad: f64, lon_rad: f64, alt_m: f64) -> [f64; 3] {
 /// `obs_lat` and `obs_lon` are in radians.
 pub fn az_el_dist(obs_r: [f64; 3], obs_lat: f64, obs_lon: f64, tgt_r: [f64; 3]) -> (f64, f64, f64) {
     // Range vector in ECI
-    let dr = [tgt_r[0]-obs_r[0], tgt_r[1]-obs_r[1], tgt_r[2]-obs_r[2]];
+    let dr = [
+        tgt_r[0] - obs_r[0],
+        tgt_r[1] - obs_r[1],
+        tgt_r[2] - obs_r[2],
+    ];
     let dist_m = norm(dr);
-    if dist_m < 1.0 { return (0.0, 0.0, 0.0); }
+    if dist_m < 1.0 {
+        return (0.0, 0.0, 0.0);
+    }
     let dr_u = normalize(dr);
 
     // NED unit vectors at observer (ECI, Earth assumed non-rotating for instantaneous geometry)
     // N: north = d(obs_r_unit)/d(lat) at obs position
     let (sin_lat, cos_lat) = (obs_lat.sin(), obs_lat.cos());
     let (sin_lon, cos_lon) = (obs_lon.sin(), obs_lon.cos());
-    let north = [-sin_lat*cos_lon, -sin_lat*sin_lon, cos_lat];
-    let east  = [-sin_lon,          cos_lon,           0.0  ];
-    let up    = [ cos_lat*cos_lon,  cos_lat*sin_lon,  sin_lat];
+    let north = [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat];
+    let east = [-sin_lon, cos_lon, 0.0];
+    let up = [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat];
 
     let d_n = dot(dr_u, north);
     let d_e = dot(dr_u, east);
     let d_u = dot(dr_u, up);
 
     let el_rad = d_u.asin();
-    let az_rad = d_e.atan2(d_n);  // atan2(E, N) → 0=North, 90=East
+    let az_rad = d_e.atan2(d_n); // atan2(E, N) → 0=North, 90=East
 
     let az_deg = az_rad.to_degrees().rem_euclid(360.0);
     let el_deg = el_rad.to_degrees();

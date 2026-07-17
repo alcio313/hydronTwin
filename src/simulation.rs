@@ -1,5 +1,5 @@
-use crate::models::{Satellite, OrbitType, Constellation, Segment};
 use crate::config::Config;
+use crate::models::{Constellation, OrbitType, Satellite, Segment};
 
 pub fn create_satellites_from_config(config: &Config) -> Constellation {
     let mut leo_sats = Vec::new();
@@ -12,19 +12,11 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
         let u = (i as f64) * 2.0 * std::f64::consts::PI / (config.leo_num as f64);
         let r_plane = [r_leo * u.cos(), r_leo * u.sin(), 0.0];
         let v_plane = [-v_leo_mag * u.sin(), v_leo_mag * u.cos(), 0.0];
-        
+
         let c_i = inc_leo.cos();
         let s_i = inc_leo.sin();
-        let r_eci = [
-            r_plane[0],
-            r_plane[1] * c_i,
-            r_plane[1] * s_i
-        ];
-        let v_eci = [
-            v_plane[0],
-            v_plane[1] * c_i,
-            v_plane[1] * s_i
-        ];
+        let r_eci = [r_plane[0], r_plane[1] * c_i, r_plane[1] * s_i];
+        let v_eci = [v_plane[0], v_plane[1] * c_i, v_plane[1] * s_i];
 
         leo_sats.push(Satellite {
             id: format!("LEO_{:02}", i),
@@ -50,7 +42,11 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
     let inc_meo = config.meo_inc_deg.to_radians();
 
     for i in 0..config.meo_num {
-        let raan = if !config.meo_raans.is_empty() { config.meo_raans[0] } else { 0.0 };
+        let raan = if !config.meo_raans.is_empty() {
+            config.meo_raans[0]
+        } else {
+            0.0
+        };
         let raan_rad = raan.to_radians();
         let u = (i as f64) * 2.0 * std::f64::consts::PI / (config.meo_num as f64);
         let r_plane = [r_meo * u.cos(), r_meo * u.sin(), 0.0];
@@ -64,12 +60,12 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
         let r_eci = [
             c_r * r_plane[0] - s_r * c_i * r_plane[1],
             s_r * r_plane[0] + c_r * c_i * r_plane[1],
-            s_i * r_plane[1]
+            s_i * r_plane[1],
         ];
         let v_eci = [
             c_r * v_plane[0] - s_r * c_i * v_plane[1],
             s_r * v_plane[0] + c_r * c_i * v_plane[1],
-            s_i * v_plane[1]
+            s_i * v_plane[1],
         ];
 
         meo_sats.push(Satellite {
@@ -102,16 +98,8 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
 
         let c_i = inc_geo.cos();
         let s_i = inc_geo.sin();
-        let r_eci = [
-            r_plane[0],
-            r_plane[1] * c_i,
-            r_plane[1] * s_i
-        ];
-        let v_eci = [
-            v_plane[0],
-            v_plane[1] * c_i,
-            v_plane[1] * s_i
-        ];
+        let r_eci = [r_plane[0], r_plane[1] * c_i, r_plane[1] * s_i];
+        let v_eci = [v_plane[0], v_plane[1] * c_i, v_plane[1] * s_i];
 
         geo_sats.push(Satellite {
             id: format!("GEO_{:02}", i),
@@ -132,9 +120,18 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
     }
 
     let segments = vec![
-        Segment { orbit_type: OrbitType::LEO, satellites: leo_sats },
-        Segment { orbit_type: OrbitType::MEO, satellites: meo_sats },
-        Segment { orbit_type: OrbitType::GEO, satellites: geo_sats },
+        Segment {
+            orbit_type: OrbitType::LEO,
+            satellites: leo_sats,
+        },
+        Segment {
+            orbit_type: OrbitType::MEO,
+            satellites: meo_sats,
+        },
+        Segment {
+            orbit_type: OrbitType::GEO,
+            satellites: geo_sats,
+        },
     ];
 
     Constellation {
@@ -142,4 +139,3 @@ pub fn create_satellites_from_config(config: &Config) -> Constellation {
         segments,
     }
 }
-

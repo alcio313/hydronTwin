@@ -1,11 +1,11 @@
-use std::io::{self, BufRead};
-#[cfg(not(target_arch = "wasm32"))]
-use std::io::BufReader;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
+use crate::models::{GroundStation, SimEnvironment};
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
-use crate::models::{GroundStation, SimEnvironment};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::BufReader;
+use std::io::{self, BufRead};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -53,7 +53,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut leo_area = 0.1;
     let mut leo_cd = 2.2;
     let mut leo_cr = 1.2;
-    
+
     let mut meo_num = 4;
     let mut meo_alt_km = 10000.0;
     let mut meo_inc_deg = 55.0;
@@ -62,7 +62,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut meo_area = 0.25;
     let mut meo_cd = 0.0;
     let mut meo_cr = 1.2;
-    
+
     let mut geo_num = 3;
     let mut geo_lons = vec![0.0, 60.0, -120.0];
     let mut geo_alt_km = 35786.0;
@@ -71,9 +71,14 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut geo_area = 1.5;
     let mut geo_cd = 0.0;
     let mut geo_cr = 1.2;
-    
+
     let mut stations = Vec::new();
-    let mut atmos_states = vec!["clear".to_string(), "thin_clouds".to_string(), "thick_clouds".to_string(), "heavy".to_string()];
+    let mut atmos_states = vec![
+        "clear".to_string(),
+        "thin_clouds".to_string(),
+        "thick_clouds".to_string(),
+        "heavy".to_string(),
+    ];
     let mut atmos_k = vec![0.05, 0.2, 1.5, 5.0];
     let transition_matrix = vec![
         vec![0.85, 0.10, 0.04, 0.01],
@@ -81,7 +86,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
         vec![0.05, 0.15, 0.65, 0.15],
         vec![0.02, 0.08, 0.20, 0.70],
     ];
-    
+
     let mut mu = 3.986004418e14;
     let mut r_earth = 6378137.0;
     let mut j2 = 1.08262668e-3;
@@ -89,7 +94,7 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
     let mut h0 = 500.0;
     let mut scale_height = 70.0;
     let mut p_srp = 4.56e-6;
-    
+
     let mut dt_time_step = 1.0;
     let mut ref_dist_isl_km = 1000.0;
     let mut ref_dist_sgl_km = 1000.0;
@@ -108,10 +113,13 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        
+
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            let section = trimmed[1..trimmed.len()-1].trim().to_string();
-            if section == "ground.stations" || section == "[ground.stations]" || section == "[[ground.stations]]" {
+            let section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            if section == "ground.stations"
+                || section == "[ground.stations]"
+                || section == "[[ground.stations]]"
+            {
                 if !station_id.is_empty() {
                     stations.push(GroundStation {
                         id: station_id.clone(),
@@ -139,113 +147,120 @@ pub fn parse_config_from_reader<R: BufRead>(reader: R) -> io::Result<Config> {
 
         if let Some(pos) = trimmed.find('=') {
             let key = trimmed[..pos].trim();
-            let val = trimmed[pos+1..].trim();
-            
+            let val = trimmed[pos + 1..].trim();
+
             match current_section.as_str() {
                 "constellation" => {
-                    if key == "name" { name = val.replace('"', ""); }
-                }
-                "constellation.leo" => {
-                    match key {
-                        "num_satellites" => leo_num = val.parse().unwrap_or(leo_num),
-                        "altitude_km" => leo_alt_km = val.parse().unwrap_or(leo_alt_km),
-                        "inclination_deg" => leo_inc_deg = val.parse().unwrap_or(leo_inc_deg),
-                        "mass_kg" => leo_mass = val.parse().unwrap_or(leo_mass),
-                        "cross_section_area_m2" => leo_area = val.parse().unwrap_or(leo_area),
-                        "cd" => leo_cd = val.parse().unwrap_or(leo_cd),
-                        "cr" => leo_cr = val.parse().unwrap_or(leo_cr),
-                        _ => {}
+                    if key == "name" {
+                        name = val.replace('"', "");
                     }
                 }
-                "constellation.meo" => {
-                    match key {
-                        "num_satellites" => meo_num = val.parse().unwrap_or(meo_num),
-                        "altitude_km" => meo_alt_km = val.parse().unwrap_or(meo_alt_km),
-                        "inclination_deg" => meo_inc_deg = val.parse().unwrap_or(meo_inc_deg),
-                        "mass_kg" => meo_mass = val.parse().unwrap_or(meo_mass),
-                        "cross_section_area_m2" => meo_area = val.parse().unwrap_or(meo_area),
-                        "cd" => meo_cd = val.parse().unwrap_or(meo_cd),
-                        "cr" => meo_cr = val.parse().unwrap_or(meo_cr),
-                        "raans_deg" => {
-                            let clean = val.replace('[', "").replace(']', "");
-                            meo_raans = clean.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                        }
-                        _ => {}
+                "constellation.leo" => match key {
+                    "num_satellites" => leo_num = val.parse().unwrap_or(leo_num),
+                    "altitude_km" => leo_alt_km = val.parse().unwrap_or(leo_alt_km),
+                    "inclination_deg" => leo_inc_deg = val.parse().unwrap_or(leo_inc_deg),
+                    "mass_kg" => leo_mass = val.parse().unwrap_or(leo_mass),
+                    "cross_section_area_m2" => leo_area = val.parse().unwrap_or(leo_area),
+                    "cd" => leo_cd = val.parse().unwrap_or(leo_cd),
+                    "cr" => leo_cr = val.parse().unwrap_or(leo_cr),
+                    _ => {}
+                },
+                "constellation.meo" => match key {
+                    "num_satellites" => meo_num = val.parse().unwrap_or(meo_num),
+                    "altitude_km" => meo_alt_km = val.parse().unwrap_or(meo_alt_km),
+                    "inclination_deg" => meo_inc_deg = val.parse().unwrap_or(meo_inc_deg),
+                    "mass_kg" => meo_mass = val.parse().unwrap_or(meo_mass),
+                    "cross_section_area_m2" => meo_area = val.parse().unwrap_or(meo_area),
+                    "cd" => meo_cd = val.parse().unwrap_or(meo_cd),
+                    "cr" => meo_cr = val.parse().unwrap_or(meo_cr),
+                    "raans_deg" => {
+                        let clean = val.replace('[', "").replace(']', "");
+                        meo_raans = clean
+                            .split(',')
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
                     }
-                }
-                "constellation.geo" => {
-                    match key {
-                        "num_satellites" => geo_num = val.parse().unwrap_or(geo_num),
-                        "altitude_km" => geo_alt_km = val.parse().unwrap_or(geo_alt_km),
-                        "inclination_deg" => geo_inc_deg = val.parse().unwrap_or(geo_inc_deg),
-                        "mass_kg" => geo_mass = val.parse().unwrap_or(geo_mass),
-                        "cross_section_area_m2" => geo_area = val.parse().unwrap_or(geo_area),
-                        "cd" => geo_cd = val.parse().unwrap_or(geo_cd),
-                        "cr" => geo_cr = val.parse().unwrap_or(geo_cr),
-                        "longitudes_deg" => {
-                            let clean = val.replace('[', "").replace(']', "");
-                            geo_lons = clean.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                        }
-                        _ => {}
+                    _ => {}
+                },
+                "constellation.geo" => match key {
+                    "num_satellites" => geo_num = val.parse().unwrap_or(geo_num),
+                    "altitude_km" => geo_alt_km = val.parse().unwrap_or(geo_alt_km),
+                    "inclination_deg" => geo_inc_deg = val.parse().unwrap_or(geo_inc_deg),
+                    "mass_kg" => geo_mass = val.parse().unwrap_or(geo_mass),
+                    "cross_section_area_m2" => geo_area = val.parse().unwrap_or(geo_area),
+                    "cd" => geo_cd = val.parse().unwrap_or(geo_cd),
+                    "cr" => geo_cr = val.parse().unwrap_or(geo_cr),
+                    "longitudes_deg" => {
+                        let clean = val.replace('[', "").replace(']', "");
+                        geo_lons = clean
+                            .split(',')
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
                     }
-                }
-                "ground.stations" => {
-                    match key {
-                        "id" => station_id = val.replace('"', "").replace(',', ""),
-                        "name" => station_name = val.replace('"', "").replace(',', ""),
-                        "lat_deg" => station_lat = val.parse().unwrap_or(0.0),
-                        "lon_deg" => station_lon = val.parse().unwrap_or(0.0),
-                        "alt_m" => station_alt = val.parse().unwrap_or(0.0),
-                        "downlink_nominal_gbps" => {
-                            let clean = val.replace('"', "").replace(',', "").trim().to_lowercase();
-                            station_cap = if clean == "inf" || clean == "infinity" || clean == "unlimited" {
+                    _ => {}
+                },
+                "ground.stations" => match key {
+                    "id" => station_id = val.replace('"', "").replace(',', ""),
+                    "name" => station_name = val.replace('"', "").replace(',', ""),
+                    "lat_deg" => station_lat = val.parse().unwrap_or(0.0),
+                    "lon_deg" => station_lon = val.parse().unwrap_or(0.0),
+                    "alt_m" => station_alt = val.parse().unwrap_or(0.0),
+                    "downlink_nominal_gbps" => {
+                        let clean = val.replace('"', "").replace(',', "").trim().to_lowercase();
+                        station_cap =
+                            if clean == "inf" || clean == "infinity" || clean == "unlimited" {
                                 f64::INFINITY
                             } else {
                                 clean.parse().unwrap_or(f64::INFINITY)
                             };
-                        }
-                        _ => {}
                     }
-                }
+                    _ => {}
+                },
                 "atmosphere" => {
                     match key {
                         "states" => {
                             let clean = val.replace('[', "").replace(']', "");
-                            atmos_states = clean.split(',').map(|s| s.trim().replace('"', "")).collect();
+                            atmos_states = clean
+                                .split(',')
+                                .map(|s| s.trim().replace('"', ""))
+                                .collect();
                         }
                         "k_values_per_km" => {
                             let clean = val.replace('[', "").replace(']', "");
-                            atmos_k = clean.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                            atmos_k = clean
+                                .split(',')
+                                .filter_map(|s| s.trim().parse().ok())
+                                .collect();
                         }
                         // Transition matrix parsing is bypassed for standard lookups to remain robust.
                         _ => {}
                     }
                 }
-                "environment" => {
-                    match key {
-                        "mu" => mu = val.parse().unwrap_or(mu),
-                        "r_earth" => r_earth = val.parse().unwrap_or(r_earth),
-                        "j2" => j2 = val.parse().unwrap_or(j2),
-                        "rho0_500km" => rho0 = val.parse().unwrap_or(rho0),
-                        "h0_km" => h0 = val.parse().unwrap_or(h0),
-                        "scale_height_km" => scale_height = val.parse().unwrap_or(scale_height),
-                        "p_srp" => p_srp = val.parse().unwrap_or(p_srp),
-                        _ => {}
+                "environment" => match key {
+                    "mu" => mu = val.parse().unwrap_or(mu),
+                    "r_earth" => r_earth = val.parse().unwrap_or(r_earth),
+                    "j2" => j2 = val.parse().unwrap_or(j2),
+                    "rho0_500km" => rho0 = val.parse().unwrap_or(rho0),
+                    "h0_km" => h0 = val.parse().unwrap_or(h0),
+                    "scale_height_km" => scale_height = val.parse().unwrap_or(scale_height),
+                    "p_srp" => p_srp = val.parse().unwrap_or(p_srp),
+                    _ => {}
+                },
+                "digital_twin" => match key {
+                    "time_step_s" => dt_time_step = val.parse().unwrap_or(dt_time_step),
+                    "ref_distance_isl_km" => {
+                        ref_dist_isl_km = val.parse().unwrap_or(ref_dist_isl_km)
                     }
-                }
-                "digital_twin" => {
-                    match key {
-                        "time_step_s" => dt_time_step = val.parse().unwrap_or(dt_time_step),
-                        "ref_distance_isl_km" => ref_dist_isl_km = val.parse().unwrap_or(ref_dist_isl_km),
-                        "ref_distance_sgl_km" => ref_dist_sgl_km = val.parse().unwrap_or(ref_dist_sgl_km),
-                        _ => {}
+                    "ref_distance_sgl_km" => {
+                        ref_dist_sgl_km = val.parse().unwrap_or(ref_dist_sgl_km)
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             }
         }
     }
-    
+
     // Add the final ground station
     if !station_id.is_empty() {
         stations.push(GroundStation {
