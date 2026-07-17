@@ -1,13 +1,13 @@
-use std::fs::File;
-use eframe::egui;
-use crate::models::*;
 use crate::config::*;
-use crate::simulation::*;
-use crate::physics::*;
-use crate::network::*;
-use crate::math::*;
 #[cfg(target_arch = "wasm32")]
 use crate::download_file;
+use crate::math::*;
+use crate::models::*;
+use crate::network::*;
+use crate::physics::*;
+use crate::simulation::*;
+use eframe::egui;
+use std::fs::File;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RibbonTab {
@@ -151,7 +151,7 @@ impl HydronGuiApp {
 
         let constellation = create_satellites_from_config(&config);
         let ground_stations = config.stations.clone();
-        
+
         let mut selected_id = "None".to_string();
         for seg in &constellation.segments {
             if !seg.satellites.is_empty() {
@@ -159,7 +159,7 @@ impl HydronGuiApp {
                 break;
             }
         }
-        
+
         let mut app = Self {
             leo_num_input: config.leo_num,
             leo_alt_input: config.leo_alt_km,
@@ -170,35 +170,35 @@ impl HydronGuiApp {
             geo_num_input: config.geo_num,
             geo_alt_input: config.geo_alt_km,
             geo_inc_input: config.geo_inc_deg,
-            
+
             sat_mass_input: config.leo_mass,
             sat_cd_input: config.leo_cd,
             sat_cr_input: config.leo_cr,
-            
+
             gyro_noise: 1e-6,
             mag_noise: 1e-8,
             sun_noise: 1e-3,
             st_noise: 1e-4,
-            
+
             force_disturbance: false,
             disturbance_val: [0.0, 0.0, 0.0],
-            
+
             weather_overrides: vec![Some(0); ground_stations.len()],
             active_tab: RibbonTab::Simulation,
             show_telemetry_hud: true,
             show_logs_hud: true,
             show_stations_hud: true,
             show_leo_list_hud: true,
-            
+
             show_leo: true,
             show_meo: true,
             show_geo: true,
             show_sgl: true,
             prioritize_relay: false,
-            
+
             logs: vec!["System Digital Twin Initialized.".to_string()],
             config_path: "config.toml".to_string(),
-            
+
             selected_satellite_id: selected_id,
             dragging_satellite_id: None,
             constellation,
@@ -214,7 +214,7 @@ impl HydronGuiApp {
             current_time: 0.0,
             time_warp: 1,
             step_size: 1.0,
-            
+
             history_time: Vec::new(),
             history_stations: vec![Vec::new(); ground_stations.len()],
             history_total: Vec::new(),
@@ -238,8 +238,8 @@ impl HydronGuiApp {
             add_const_cd: 2.2,
             add_const_cr: 1.2,
             add_sat_color: [0.18, 0.83, 0.75],   // default teal
-            add_const_color: [0.91, 0.47, 0.98],  // default magenta
-            earth_texture: None, // Will load below
+            add_const_color: [0.91, 0.47, 0.98], // default magenta
+            earth_texture: None,                 // Will load below
             leo_max_bitrate: 100.0,
             meo_max_bitrate: 400.0,
             geo_max_bitrate: 800.0,
@@ -267,7 +267,8 @@ impl HydronGuiApp {
     }
 
     fn log(&mut self, msg: &str) {
-        self.logs.push(format!("[{:.1}s] {}", self.current_time, msg));
+        self.logs
+            .push(format!("[{:.1}s] {}", self.current_time, msg));
         if self.logs.len() > 100 {
             self.logs.remove(0);
         }
@@ -325,7 +326,7 @@ impl HydronGuiApp {
         let sim_duration = 86400.0;
         let step_size = 10.0; // 10s steps for excellent resolution
         let mut current_time = 0.0;
-        
+
         let sun_vector = [1.0, 0.0, 0.0];
         let b_eci_mock = [1e-5, 2e-5, -3e-5];
 
@@ -359,14 +360,23 @@ impl HydronGuiApp {
                 [rot_mat[0][2], rot_mat[1][2], rot_mat[2][2]],
             ];
 
-            let all_sats: Vec<(String, OrbitType, [f64; 3])> = constellation.segments.iter()
-                .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
+            let all_sats: Vec<(String, OrbitType, [f64; 3])> = constellation
+                .segments
+                .iter()
+                .flat_map(|seg| {
+                    seg.satellites
+                        .iter()
+                        .map(|s| (s.id.clone(), s.orbit_type.clone(), s.r))
+                })
                 .collect();
 
-            let gs_eci_list: Vec<[f64; 3]> = ground_stations.iter().map(|gs| {
-                let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-                mat_vec_mult(rot_mat_t, ecef)
-            }).collect();
+            let gs_eci_list: Vec<[f64; 3]> = ground_stations
+                .iter()
+                .map(|gs| {
+                    let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                    mat_vec_mult(rot_mat_t, ecef)
+                })
+                .collect();
 
             let mut gs_throughputs = vec![0.0; ground_stations.len()];
             let mut total_throughput = 0.0;
@@ -394,10 +404,15 @@ impl HydronGuiApp {
                 let mut best_idx = usize::MAX;
                 for (i, other_eci) in gs_eci_list.iter().enumerate() {
                     let cap = compute_link_capacity(
-                        *sat_r, *other_eci, true,
+                        *sat_r,
+                        *other_eci,
+                        true,
                         ground_stations[i].k_value,
-                        sat_ref_dist, sat_max, &self.config.env
-                    ).min(sat_max);
+                        sat_ref_dist,
+                        sat_max,
+                        &self.config.env,
+                    )
+                    .min(sat_max);
                     if cap > best_cap {
                         best_cap = cap;
                         best_idx = i;
@@ -456,7 +471,15 @@ impl HydronGuiApp {
                                 OrbitType::MEO => self.config.meo_alt_km,
                                 OrbitType::GEO => self.config.geo_alt_km,
                             };
-                            compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
+                            compute_link_capacity(
+                                *r1,
+                                *r2,
+                                false,
+                                0.0,
+                                sat_ref_dist,
+                                nominal_capacity,
+                                &self.config.env,
+                            )
                         };
                         let mut capacity = capacity;
                         // Bound by the downstream reach-to-ground so the relay chain bottleneck
@@ -517,10 +540,14 @@ impl HydronGuiApp {
                 } else {
                     let (id2, type2, _) = &all_sats[j];
 
-                    if type1 == &OrbitType::LEO && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1 {
+                    if type1 == &OrbitType::LEO
+                        && *leo_isl_count.entry(id1.clone()).or_insert(0) >= 1
+                    {
                         continue;
                     }
-                    if type2 == &OrbitType::LEO && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1 {
+                    if type2 == &OrbitType::LEO
+                        && *leo_isl_count.entry(id2.clone()).or_insert(0) >= 1
+                    {
                         continue;
                     }
 
@@ -540,7 +567,10 @@ impl HydronGuiApp {
             for val in &gs_throughputs {
                 row_str.push_str(&format!(",{}", val));
             }
-            row_str.push_str(&format!(",{},{},{}\n", total_throughput, active_isl_links, active_sgl_links));
+            row_str.push_str(&format!(
+                ",{},{},{}\n",
+                total_throughput, active_isl_links, active_sgl_links
+            ));
             file.write_all(row_str.as_bytes())?;
 
             current_time += step_size;
@@ -562,22 +592,49 @@ impl HydronGuiApp {
             .iter()
             .map(|(_, orbit_type, r)| {
                 let (max_cap, sgl_ref_dist, isl_ref_dist, is_relay) = match orbit_type {
-                    OrbitType::LEO => (self.leo_max_bitrate, self.config.ref_dist_sgl_km, self.config.ref_dist_isl_km, false),
-                    OrbitType::MEO => (self.meo_max_bitrate, self.config.meo_alt_km, self.config.meo_alt_km, true),
-                    OrbitType::GEO => (self.geo_max_bitrate, self.config.geo_alt_km, self.config.geo_alt_km, true),
+                    OrbitType::LEO => (
+                        self.leo_max_bitrate,
+                        self.config.ref_dist_sgl_km,
+                        self.config.ref_dist_isl_km,
+                        false,
+                    ),
+                    OrbitType::MEO => (
+                        self.meo_max_bitrate,
+                        self.config.meo_alt_km,
+                        self.config.meo_alt_km,
+                        true,
+                    ),
+                    OrbitType::GEO => (
+                        self.geo_max_bitrate,
+                        self.config.geo_alt_km,
+                        self.config.geo_alt_km,
+                        true,
+                    ),
                 };
-                RouteNode { is_relay, max_cap, sgl_ref_dist, isl_ref_dist, r: *r }
+                RouteNode {
+                    is_relay,
+                    max_cap,
+                    sgl_ref_dist,
+                    isl_ref_dist,
+                    r: *r,
+                }
             })
             .collect();
         let gs_k: Vec<f64> = stations.iter().map(|g| g.k_value).collect();
         compute_ground_reach(&nodes, gs_eci, &gs_k, &self.config.env)
     }
 
-    fn drag_satellite_to(&mut self, sat_id: &str, mouse_pos: egui::Pos2, center: egui::Pos2, scale_factor: f64) {
+    fn drag_satellite_to(
+        &mut self,
+        sat_id: &str,
+        mouse_pos: egui::Pos2,
+        center: egui::Pos2,
+        scale_factor: f64,
+    ) {
         let mut target_sat_pos = None;
         let mut target_sat_vel = None;
         let mut segment_idx = usize::MAX;
-        
+
         for (seg_i, seg) in self.constellation.segments.iter().enumerate() {
             for sat in &seg.satellites {
                 if sat.id == *sat_id {
@@ -592,7 +649,11 @@ impl HydronGuiApp {
             }
         }
 
-        if let (Some(r), Some(v), true) = (target_sat_pos, target_sat_vel, segment_idx < self.constellation.segments.len()) {
+        if let (Some(r), Some(v), true) = (
+            target_sat_pos,
+            target_sat_vel,
+            segment_idx < self.constellation.segments.len(),
+        ) {
             let r_len = norm(r);
             let v_len = norm(v);
             if r_len > 0.0 && v_len > 0.0 {
@@ -623,7 +684,10 @@ impl HydronGuiApp {
                 let steps = 120;
                 for step in 0..steps {
                     let theta = (step as f64 * 2.0 * std::f64::consts::PI) / (steps as f64);
-                    let r_sample = add(scale(u_r, r_len * theta.cos()), scale(u_v, r_len * theta.sin()));
+                    let r_sample = add(
+                        scale(u_r, r_len * theta.cos()),
+                        scale(u_v, r_len * theta.sin()),
+                    );
                     let screen_pos = project_pos(r_sample);
                     let dist = screen_pos.distance(mouse_pos);
                     if dist < min_dist {
@@ -638,7 +702,9 @@ impl HydronGuiApp {
                 // Move only the dragged satellite (not the whole segment)
                 'outer: for seg in &mut self.constellation.segments {
                     for sat in &mut seg.satellites {
-                        if sat.id != sat_id { continue; }
+                        if sat.id != sat_id {
+                            continue;
+                        }
                         let r_curr = sat.r;
                         let v_curr = sat.v;
                         let r_c_len = norm(r_curr);
@@ -647,7 +713,8 @@ impl HydronGuiApp {
                             let u_rc = scale(r_curr, 1.0 / r_c_len);
                             let u_vc = scale(v_curr, 1.0 / v_c_len);
                             sat.r = add(scale(u_rc, r_c_len * cos_t), scale(u_vc, r_c_len * sin_t));
-                            sat.v = add(scale(u_vc, v_c_len * cos_t), scale(u_rc, -v_c_len * sin_t));
+                            sat.v =
+                                add(scale(u_vc, v_c_len * cos_t), scale(u_rc, -v_c_len * sin_t));
                         }
                         break 'outer;
                     }
@@ -675,8 +742,12 @@ impl HydronGuiApp {
                 }
                 self.update_input_fields_for_selected();
                 self.weather_overrides = vec![Some(0); self.ground_stations.len()];
-                self.history_stations = vec![vec![0.0f32; self.history_time.len()]; self.ground_stations.len()];
-                self.log(&format!("Configurazione importata correttamente da {}", source_name));
+                self.history_stations =
+                    vec![vec![0.0f32; self.history_time.len()]; self.ground_stations.len()];
+                self.log(&format!(
+                    "Configurazione importata correttamente da {}",
+                    source_name
+                ));
                 Ok(())
             }
             Err(e) => {
@@ -702,11 +773,11 @@ impl HydronGuiApp {
     fn generate_toml_string(&self) -> String {
         let c = &self.config;
         let mut toml = String::new();
-        
+
         toml.push_str("# ESA HydRON Digital Twin Config file\n\n");
         toml.push_str("[constellation]\n");
         toml.push_str(&format!("name = \"{}\"\n\n", c.name));
-        
+
         toml.push_str("[constellation.leo]\n");
         toml.push_str(&format!("num_satellites = {}\n", c.leo_num));
         toml.push_str(&format!("altitude_km = {:.1}\n", c.leo_alt_km));
@@ -720,7 +791,12 @@ impl HydronGuiApp {
         toml.push_str(&format!("num_satellites = {}\n", c.meo_num));
         toml.push_str(&format!("altitude_km = {:.1}\n", c.meo_alt_km));
         toml.push_str(&format!("inclination_deg = {:.4}\n", c.meo_inc_deg));
-        let raans_str = c.meo_raans.iter().map(|v| format!("{:.1}", v)).collect::<Vec<_>>().join(", ");
+        let raans_str = c
+            .meo_raans
+            .iter()
+            .map(|v| format!("{:.1}", v))
+            .collect::<Vec<_>>()
+            .join(", ");
         toml.push_str(&format!("raans_deg = [{}]\n", raans_str));
         toml.push_str(&format!("mass_kg = {:.1}\n", c.meo_mass));
         toml.push_str(&format!("cross_section_area_m2 = {:.4}\n", c.meo_area));
@@ -729,7 +805,12 @@ impl HydronGuiApp {
 
         toml.push_str("[constellation.geo]\n");
         toml.push_str(&format!("num_satellites = {}\n", c.geo_num));
-        let geo_lons_str = c.geo_lons.iter().map(|v| format!("{:.1}", v)).collect::<Vec<_>>().join(", ");
+        let geo_lons_str = c
+            .geo_lons
+            .iter()
+            .map(|v| format!("{:.1}", v))
+            .collect::<Vec<_>>()
+            .join(", ");
         toml.push_str(&format!("longitudes_deg = [{}]\n", geo_lons_str));
         toml.push_str(&format!("altitude_km = {:.1}\n", c.geo_alt_km));
         toml.push_str(&format!("inclination_deg = {:.4}\n", c.geo_inc_deg));
@@ -755,13 +836,27 @@ impl HydronGuiApp {
         }
 
         toml.push_str("[atmosphere]\n");
-        let states_str = c.atmos_states.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
+        let states_str = c
+            .atmos_states
+            .iter()
+            .map(|s| format!("\"{}\"", s))
+            .collect::<Vec<_>>()
+            .join(", ");
         toml.push_str(&format!("states = [{}]\n", states_str));
-        let k_str = c.atmos_k.iter().map(|v| format!("{:.2}", v)).collect::<Vec<_>>().join(", ");
+        let k_str = c
+            .atmos_k
+            .iter()
+            .map(|v| format!("{:.2}", v))
+            .collect::<Vec<_>>()
+            .join(", ");
         toml.push_str(&format!("k_values_per_km = [{}]\n", k_str));
         toml.push_str("transition_matrix = [\n");
         for row in &c.transition_matrix {
-            let row_str = row.iter().map(|v| format!("{:.2}", v)).collect::<Vec<_>>().join(", ");
+            let row_str = row
+                .iter()
+                .map(|v| format!("{:.2}", v))
+                .collect::<Vec<_>>()
+                .join(", ");
             toml.push_str(&format!("    [{}],\n", row_str));
         }
         toml.push_str("]\n\n");
@@ -792,7 +887,7 @@ impl HydronGuiApp {
         toml.push_str(&format!("sim_duration_s = 86400.0\n"));
         toml.push_str(&format!("ref_distance_isl_km = {:.1}\n", c.ref_dist_isl_km));
         toml.push_str(&format!("ref_distance_sgl_km = {:.1}\n", c.ref_dist_sgl_km));
-        
+
         toml
     }
 
@@ -816,17 +911,30 @@ impl HydronGuiApp {
     fn export_config(&mut self, path: &str) -> Result<(), String> {
         let toml = self.generate_toml_string();
         download_file(path, &toml);
-        self.log(&format!("Configurazione scaricata correttamente come {}", path));
+        self.log(&format!(
+            "Configurazione scaricata correttamente come {}",
+            path
+        ));
         Ok(())
     }
 
     fn draw_throughput_chart(&self, ui: &mut egui::Ui, rect: egui::Rect) {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(10, 15, 30));
-        painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 41, 59)));
+        painter.rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 41, 59)),
+        );
 
         if self.history_time.len() < 2 {
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "In attesa di dati di simulazione...", egui::FontId::proportional(12.0), egui::Color32::GRAY);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "In attesa di dati di simulazione...",
+                egui::FontId::proportional(12.0),
+                egui::Color32::GRAY,
+            );
             return;
         }
 
@@ -841,8 +949,12 @@ impl HydronGuiApp {
         let mut min_x = self.history_time[0];
         let mut max_x = self.history_time[0];
         for &t in &self.history_time {
-            if t < min_x { min_x = t; }
-            if t > max_x { max_x = t; }
+            if t < min_x {
+                min_x = t;
+            }
+            if t > max_x {
+                max_x = t;
+            }
         }
         let dx = max_x - min_x;
 
@@ -868,13 +980,19 @@ impl HydronGuiApp {
             let y_val = (k as f32 / grid_lines as f32) * max_y;
             let pos_left = to_screen(min_x, y_val);
             let pos_right = to_screen(max_x, y_val);
-            painter.line_segment([pos_left, pos_right], egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30)));
+            painter.line_segment(
+                [pos_left, pos_right],
+                egui::Stroke::new(
+                    0.5,
+                    egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30),
+                ),
+            );
             painter.text(
                 egui::pos2(rect.min.x + margin_left - 5.0, pos_left.y),
                 egui::Align2::RIGHT_CENTER,
                 format!("{:.0} Gbps", y_val),
                 egui::FontId::proportional(9.0),
-                egui::Color32::GRAY
+                egui::Color32::GRAY,
             );
         }
 
@@ -883,13 +1001,19 @@ impl HydronGuiApp {
             let x_val = min_x + (k as f32 / grid_lines_x as f32) * dx;
             let pos_bottom = to_screen(x_val, 0.0);
             let pos_top = to_screen(x_val, max_y);
-            painter.line_segment([pos_bottom, pos_top], egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30)));
+            painter.line_segment(
+                [pos_bottom, pos_top],
+                egui::Stroke::new(
+                    0.5,
+                    egui::Color32::from_rgba_unmultiplied(100, 100, 100, 30),
+                ),
+            );
             painter.text(
                 egui::pos2(pos_bottom.x, rect.max.y - margin_bottom + 8.0),
                 egui::Align2::CENTER_CENTER,
                 format!("{:.0}s", x_val),
                 egui::FontId::proportional(9.0),
-                egui::Color32::GRAY
+                egui::Color32::GRAY,
             );
         }
 
@@ -921,20 +1045,31 @@ impl HydronGuiApp {
 
         let mut legend_x = rect.min.x + margin_left + 15.0;
         let legend_y = rect.min.y + 12.0;
-        
+
         painter.circle_filled(egui::pos2(legend_x, legend_y), 3.0, egui::Color32::WHITE);
-        painter.text(egui::pos2(legend_x + 8.0, legend_y), egui::Align2::LEFT_CENTER, "Totale Aggregato", egui::FontId::proportional(9.0), egui::Color32::WHITE);
+        painter.text(
+            egui::pos2(legend_x + 8.0, legend_y),
+            egui::Align2::LEFT_CENTER,
+            "Totale Aggregato",
+            egui::FontId::proportional(9.0),
+            egui::Color32::WHITE,
+        );
         legend_x += 105.0;
 
         for i in 0..self.ground_stations.len() {
             let name = &self.ground_stations[i].name;
             let color = colors[i % colors.len()];
             painter.circle_filled(egui::pos2(legend_x, legend_y), 3.0, color);
-            painter.text(egui::pos2(legend_x + 8.0, legend_y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(9.0), egui::Color32::LIGHT_GRAY);
+            painter.text(
+                egui::pos2(legend_x + 8.0, legend_y),
+                egui::Align2::LEFT_CENTER,
+                name,
+                egui::FontId::proportional(9.0),
+                egui::Color32::LIGHT_GRAY,
+            );
             legend_x += 70.0;
         }
     }
-
 }
 
 impl eframe::App for HydronGuiApp {
@@ -966,7 +1101,11 @@ impl eframe::App for HydronGuiApp {
         if self.is_running {
             let mut pending_logs = Vec::new();
             let loops = self.time_warp.abs();
-            let dt = if self.time_warp < 0 { -self.step_size } else { self.step_size };
+            let dt = if self.time_warp < 0 {
+                -self.step_size
+            } else {
+                self.step_size
+            };
 
             for _ in 0..loops {
                 if self.current_time + dt < 0.0 {
@@ -984,14 +1123,18 @@ impl eframe::App for HydronGuiApp {
                             gs.atmos_state = forced_idx;
                             gs.k_value = self.atmos_model.k_values[forced_idx] / 1000.0;
                             let state_name = &self.atmos_model.states[forced_idx];
-                            pending_logs.push(format!("Weather at {} forced to {}", gs.name, state_name));
+                            pending_logs
+                                .push(format!("Weather at {} forced to {}", gs.name, state_name));
                         }
                     } else {
                         let prev_state = gs.atmos_state;
                         step_atmosphere(gs, &mut self.atmos_model);
                         if gs.atmos_state != prev_state {
                             let state_name = &self.atmos_model.states[gs.atmos_state];
-                            pending_logs.push(format!("Weather at {} transitioned to {}", gs.name, state_name));
+                            pending_logs.push(format!(
+                                "Weather at {} transitioned to {}",
+                                gs.name, state_name
+                            ));
                         }
                     }
                 }
@@ -1005,7 +1148,10 @@ impl eframe::App for HydronGuiApp {
                         if sat.id == self.selected_satellite_id && self.force_disturbance {
                             mtq_dipole = add(mtq_dipole, self.disturbance_val);
                             self.force_disturbance = false;
-                            pending_logs.push(format!("Injected attitude disturbance into satellite {}", sat.id));
+                            pending_logs.push(format!(
+                                "Injected attitude disturbance into satellite {}",
+                                sat.id
+                            ));
                         }
 
                         step_orbit(sat, dt, &self.config.env, sun_vector);
@@ -1028,15 +1174,26 @@ impl eframe::App for HydronGuiApp {
         ];
 
         // Gather all active satellite ECI positions
-        let all_sats: Vec<(String, OrbitType, [f64; 3])> = self.constellation.segments.iter()
-            .flat_map(|seg| seg.satellites.iter().map(|s| (s.id.clone(), s.orbit_type.clone(), s.r)))
+        let all_sats: Vec<(String, OrbitType, [f64; 3])> = self
+            .constellation
+            .segments
+            .iter()
+            .flat_map(|seg| {
+                seg.satellites
+                    .iter()
+                    .map(|s| (s.id.clone(), s.orbit_type.clone(), s.r))
+            })
             .collect();
 
         // Gather all GS ECI positions
-        let gs_eci_list: Vec<[f64; 3]> = self.ground_stations.iter().map(|gs| {
-            let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-            mat_vec_mult(rot_mat_t, ecef)
-        }).collect();
+        let gs_eci_list: Vec<[f64; 3]> = self
+            .ground_stations
+            .iter()
+            .map(|gs| {
+                let ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                mat_vec_mult(rot_mat_t, ecef)
+            })
+            .collect();
 
         // Pre-calculate connected satellites for each GS and throughputs
         let mut connected_sats_per_gs = vec![Vec::new(); self.ground_stations.len()];
@@ -1068,10 +1225,15 @@ impl eframe::App for HydronGuiApp {
             let mut best_idx = usize::MAX;
             for (i, other_eci) in gs_eci_list.iter().enumerate() {
                 let cap = compute_link_capacity(
-                    *sat_r, *other_eci, true,
+                    *sat_r,
+                    *other_eci,
+                    true,
                     self.ground_stations[i].k_value,
-                    sat_ref_dist, sat_max, &self.config.env
-                ).min(sat_max);
+                    sat_ref_dist,
+                    sat_max,
+                    &self.config.env,
+                )
+                .min(sat_max);
                 if cap > best_cap {
                     best_cap = cap;
                     best_idx = i;
@@ -1083,7 +1245,12 @@ impl eframe::App for HydronGuiApp {
                     leo_best_gs[sat_idx] = best_idx;
                     leo_best_gs_cap[sat_idx] = best_cap;
                 } else {
-                    connected_sats_per_gs[best_idx].push((sat_id.clone(), orbit_label, best_cap, sat_max));
+                    connected_sats_per_gs[best_idx].push((
+                        sat_id.clone(),
+                        orbit_label,
+                        best_cap,
+                        sat_max,
+                    ));
                     gs_throughputs[best_idx] += best_cap as f32;
                     total_throughput += best_cap as f32;
                 }
@@ -1144,7 +1311,15 @@ impl eframe::App for HydronGuiApp {
                             OrbitType::MEO => self.config.meo_alt_km,
                             OrbitType::GEO => self.config.geo_alt_km,
                         };
-                        compute_link_capacity(*r1, *r2, false, 0.0, sat_ref_dist, nominal_capacity, &self.config.env)
+                        compute_link_capacity(
+                            *r1,
+                            *r2,
+                            false,
+                            0.0,
+                            sat_ref_dist,
+                            nominal_capacity,
+                            &self.config.env,
+                        )
                     };
                     let mut capacity = capacity;
                     // Bound the link by the downstream reach-to-ground of whichever endpoint
@@ -1204,7 +1379,12 @@ impl eframe::App for HydronGuiApp {
 
                 let gs_idx = leo_best_gs[i];
                 let gs_name = &self.ground_stations[gs_idx].name;
-                connected_sats_per_gs[gs_idx].push((id1.clone(), "LEO", capacity, self.leo_max_bitrate));
+                connected_sats_per_gs[gs_idx].push((
+                    id1.clone(),
+                    "LEO",
+                    capacity,
+                    self.leo_max_bitrate,
+                ));
                 gs_throughputs[gs_idx] += capacity as f32;
                 total_throughput += capacity as f32;
                 sat_sgl_link.insert(id1.clone(), (gs_name.clone(), capacity));
@@ -1414,7 +1594,7 @@ impl eframe::App for HydronGuiApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("🛠️ CUSTOM ITEMS").strong().color(egui::Color32::LIGHT_BLUE));
-                                
+
                                 let r_earth = self.config.env.r_earth;
                                 let mut custom_sats = Vec::new();
                                 for (seg_idx, seg) in self.constellation.segments.iter().enumerate() {
@@ -1425,7 +1605,7 @@ impl eframe::App for HydronGuiApp {
                                                 let v = sat.v;
                                                 let r_mag = (r[0]*r[0] + r[1]*r[1] + r[2]*r[2]).sqrt();
                                                 let alt_km = (r_mag - r_earth) / 1000.0;
-                                                
+
                                                 let h_x = r[1]*v[2] - r[2]*v[1];
                                                 let h_y = r[2]*v[0] - r[0]*v[2];
                                                 let h_z = r[0]*v[1] - r[1]*v[0];
@@ -1453,7 +1633,7 @@ impl eframe::App for HydronGuiApp {
                                     } else {
                                         format!("Const_{}", i)
                                     };
-                                    
+
                                     let (alt_km, inc_deg, mass, area) = if let Some(sat) = seg.satellites.first() {
                                         let r = sat.r;
                                         let v = sat.v;
@@ -1723,7 +1903,7 @@ impl eframe::App for HydronGuiApp {
                                                 OrbitType::MEO => 1,
                                                 OrbitType::GEO => 2,
                                             };
-                                            
+
                                             let mut sat_idx_counter = self.constellation.segments[segment_idx].satellites.len();
                                             let mut new_id = format!("{:?}_{:02}", self.add_sat_orbit_type, sat_idx_counter);
                                             loop {
@@ -1807,7 +1987,7 @@ impl eframe::App for HydronGuiApp {
                                     ui.label(egui::RichText::new("➕ ADD CUSTOM CONSTELLATION").strong().color(egui::Color32::LIGHT_BLUE));
                                     ui.horizontal(|ui| {
                                         ui.add(egui::TextEdit::singleline(&mut self.add_const_name).desired_width(80.0));
-                                        
+
                                         let mut type_changed = false;
                                         if ui.radio_value(&mut self.add_const_orbit_type, OrbitType::LEO, "LEO").clicked() { type_changed = true; }
                                         if ui.radio_value(&mut self.add_const_orbit_type, OrbitType::MEO, "MEO").clicked() { type_changed = true; }
@@ -2111,9 +2291,17 @@ impl eframe::App for HydronGuiApp {
                                                                 self.ground_stations[i].alt_m = 100.0;
                                                             }
                                                         }
-                                                        if ui.button("❌").clicked() {
-                                                            to_remove = Some(i);
-                                                        }
+                                                        ui.add_enabled_ui(self.ground_stations.len() > 1, |ui| {
+                                                            let btn = ui.button(egui::RichText::new("❌").color(egui::Color32::LIGHT_RED))
+                                                                .on_hover_text(if self.ground_stations.len() <= 1 {
+                                                                    "Impossibile rimuovere l'unica stazione di terra rimasta."
+                                                                } else {
+                                                                    "Rimuovi questa stazione di terra."
+                                                                });
+                                                            if btn.clicked() {
+                                                                to_remove = Some(i);
+                                                            }
+                                                        });
                                                     });
                                                     let mut lat_deg = self.ground_stations[i].lat_rad.to_degrees();
                                                     let mut lon_deg = self.ground_stations[i].lon_rad.to_degrees();
@@ -2182,19 +2370,34 @@ impl eframe::App for HydronGuiApp {
 
         {
             if self.show_telemetry_hud {
-            let mut open = self.show_telemetry_hud;
-            make_window!("📊 Telemetria Satellite", &mut open, egui::pos2(850.0, 150.0), egui::vec2(280.0, 320.0))
+                let mut open = self.show_telemetry_hud;
+                make_window!(
+                    "📊 Telemetria Satellite",
+                    &mut open,
+                    egui::pos2(850.0, 150.0),
+                    egui::vec2(280.0, 320.0)
+                )
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Seleziona:");
                         egui::ComboBox::from_label("")
                             .selected_text(self.selected_satellite_id.clone())
                             .show_ui(ui, |ui| {
-                                let sat_ids: Vec<String> = self.constellation.segments.iter()
+                                let sat_ids: Vec<String> = self
+                                    .constellation
+                                    .segments
+                                    .iter()
                                     .flat_map(|seg| seg.satellites.iter().map(|s| s.id.clone()))
                                     .collect();
                                 for id in sat_ids {
-                                    if ui.selectable_value(&mut self.selected_satellite_id, id.clone(), id.clone()).clicked() {
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.selected_satellite_id,
+                                            id.clone(),
+                                            id.clone(),
+                                        )
+                                        .clicked()
+                                    {
                                         self.update_input_fields_for_selected();
                                     }
                                 }
@@ -2203,16 +2406,18 @@ impl eframe::App for HydronGuiApp {
 
                     ui.separator();
 
-                    let sat_telemetry = self.find_satellite(&self.selected_satellite_id).map(|s| (
-                        s.mass,
-                        s.inertia,
-                        s.r,
-                        s.v,
-                        s.q,
-                        s.omega,
-                        s.h_rw,
-                        s.orbit_type.clone(),
-                    ));
+                    let sat_telemetry = self.find_satellite(&self.selected_satellite_id).map(|s| {
+                        (
+                            s.mass,
+                            s.inertia,
+                            s.r,
+                            s.v,
+                            s.q,
+                            s.omega,
+                            s.h_rw,
+                            s.orbit_type.clone(),
+                        )
+                    });
 
                     if let Some((mass, inertia, r, v, q, omega, h_rw, orbit_type)) = sat_telemetry {
                         let max_spd = match orbit_type {
@@ -2220,22 +2425,44 @@ impl eframe::App for HydronGuiApp {
                             OrbitType::MEO => self.meo_max_bitrate,
                             OrbitType::GEO => self.geo_max_bitrate,
                         };
-                        
+
                         {
                             ui.label(format!("Vel. Max Canale: {:.0} Gbps", max_spd));
                             ui.label(format!("Massa Bus: {:.1} kg", mass));
-                            ui.label(format!("Inerzia: [{:.2}, {:.2}, {:.2}]", inertia[0], inertia[1], inertia[2]));
-                            
+                            ui.label(format!(
+                                "Inerzia: [{:.2}, {:.2}, {:.2}]",
+                                inertia[0], inertia[1], inertia[2]
+                            ));
+
                             ui.separator();
                             ui.label(egui::RichText::new("Orbita (ECI):").strong());
-                            ui.small(format!("Pos: [{:.1}, {:.1}, {:.1}] km", r[0]/1000.0, r[1]/1000.0, r[2]/1000.0));
-                            ui.small(format!("Vel: [{:.3}, {:.3}, {:.3}] km/s", v[0]/1000.0, v[1]/1000.0, v[2]/1000.0));
+                            ui.small(format!(
+                                "Pos: [{:.1}, {:.1}, {:.1}] km",
+                                r[0] / 1000.0,
+                                r[1] / 1000.0,
+                                r[2] / 1000.0
+                            ));
+                            ui.small(format!(
+                                "Vel: [{:.3}, {:.3}, {:.3}] km/s",
+                                v[0] / 1000.0,
+                                v[1] / 1000.0,
+                                v[2] / 1000.0
+                            ));
 
                             ui.separator();
                             ui.label(egui::RichText::new("Attitudine & ADCS:").strong());
-                            ui.small(format!("Q: [{:.4}, {:.4}, {:.4}, {:.4}]", q[0], q[1], q[2], q[3]));
-                            ui.small(format!("Omega: [{:.4}, {:.4}, {:.4}] rad/s", omega[0], omega[1], omega[2]));
-                            ui.small(format!("H_rw: [{:.4}, {:.4}, {:.4}] Nms", h_rw[0], h_rw[1], h_rw[2]));
+                            ui.small(format!(
+                                "Q: [{:.4}, {:.4}, {:.4}, {:.4}]",
+                                q[0], q[1], q[2], q[3]
+                            ));
+                            ui.small(format!(
+                                "Omega: [{:.4}, {:.4}, {:.4}] rad/s",
+                                omega[0], omega[1], omega[2]
+                            ));
+                            ui.small(format!(
+                                "H_rw: [{:.4}, {:.4}, {:.4}] Nms",
+                                h_rw[0], h_rw[1], h_rw[2]
+                            ));
                         }
                         ui.separator();
                         // Link geometry towards connected GS / ISL partner
@@ -2246,170 +2473,261 @@ impl eframe::App for HydronGuiApp {
                             let sat_r_eci = sat.r;
                             // SGL link → connected ground station
                             if let Some((gs_name, _cap)) = sat_sgl_link.get(sat_id) {
-                                if let Some(gs) = self.ground_stations.iter().find(|g| &g.name == gs_name) {
+                                if let Some(gs) =
+                                    self.ground_stations.iter().find(|g| &g.name == gs_name)
+                                {
                                     let gs_ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
                                     let gst = self.current_time * 7.292115e-5;
                                     let rot = eci_to_ecef_matrix(gst);
-                                    let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
+                                    let rot_t = [
+                                        [rot[0][0], rot[1][0], rot[2][0]],
+                                        [rot[0][1], rot[1][1], rot[2][1]],
+                                        [rot[0][2], rot[1][2], rot[2][2]],
+                                    ];
                                     let gs_eci = mat_vec_mult(rot_t, gs_ecef);
-                                    let (az, el, dist) = az_el_dist(gs_eci, gs.lat_rad, gs.lon_rad + gst, sat_r_eci);
+                                    let (az, el, dist) =
+                                        az_el_dist(gs_eci, gs.lat_rad, gs.lon_rad + gst, sat_r_eci);
                                     ui.small(format!("📡 GS {} → sat", gs_name));
-                                    ui.small(format!("  Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
+                                    ui.small(format!(
+                                        "  Az {:.1}°  El {:.1}°  Dist {:.0} km",
+                                        az, el, dist
+                                    ));
                                 }
                             }
                             // ISL link → partner satellite
                             if let Some((partner_id, _cap)) = sat_isl_link.get(sat_id) {
                                 if let Some(partner) = self.find_satellite(partner_id) {
                                     let r_len = norm(sat_r_eci);
-                                    let sat_lat = if r_len > 0.0 { (sat_r_eci[2] / r_len).asin() } else { 0.0 };
+                                    let sat_lat = if r_len > 0.0 {
+                                        (sat_r_eci[2] / r_len).asin()
+                                    } else {
+                                        0.0
+                                    };
                                     let sat_lon = sat_r_eci[1].atan2(sat_r_eci[0]);
-                                    let (az, el, dist) = az_el_dist(sat_r_eci, sat_lat, sat_lon, partner.r);
+                                    let (az, el, dist) =
+                                        az_el_dist(sat_r_eci, sat_lat, sat_lon, partner.r);
                                     ui.small(format!("🛰 ISL → {}", partner_id));
-                                    ui.small(format!("  Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
+                                    ui.small(format!(
+                                        "  Az {:.1}°  El {:.1}°  Dist {:.0} km",
+                                        az, el, dist
+                                    ));
                                 }
                             }
                         }
                     }
                 });
-            self.show_telemetry_hud = open;
-        }
+                self.show_telemetry_hud = open;
+            }
 
-        if self.show_stations_hud {
-            let mut open = self.show_stations_hud;
-            make_window!("📡 Stazioni di Terra", &mut open, egui::pos2(50.0, 150.0), egui::vec2(280.0, 300.0))
+            if self.show_stations_hud {
+                let mut open = self.show_stations_hud;
+                make_window!(
+                    "📡 Stazioni di Terra",
+                    &mut open,
+                    egui::pos2(50.0, 150.0),
+                    egui::vec2(280.0, 300.0)
+                )
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().id_source("hud_gs_scroll").show(ui, |ui| {
-                        for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
-                            let weather_name = &self.atmos_model.states[gs.atmos_state];
-                            let (wx_icon, wx_color) = match gs.atmos_state {
-                                0 => ("☀", egui::Color32::from_rgb(34, 197, 94)),
-                                1 => ("⛅", egui::Color32::from_rgb(234, 179, 8)),
-                                2 => ("☁", egui::Color32::from_rgb(156, 163, 175)),
-                                _ => ("☔", egui::Color32::from_rgb(239, 68, 68)),
-                            };
-                            let connected = &connected_sats_per_gs[gs_idx];
-                            let total_gbps = gs_throughputs[gs_idx] as f64;
+                    egui::ScrollArea::vertical()
+                        .id_source("hud_gs_scroll")
+                        .show(ui, |ui| {
+                            for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
+                                let weather_name = &self.atmos_model.states[gs.atmos_state];
+                                let (wx_icon, wx_color) = match gs.atmos_state {
+                                    0 => ("☀", egui::Color32::from_rgb(34, 197, 94)),
+                                    1 => ("⛅", egui::Color32::from_rgb(234, 179, 8)),
+                                    2 => ("☁", egui::Color32::from_rgb(156, 163, 175)),
+                                    _ => ("☔", egui::Color32::from_rgb(239, 68, 68)),
+                                };
+                                let connected = &connected_sats_per_gs[gs_idx];
+                                let total_gbps = gs_throughputs[gs_idx] as f64;
 
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(wx_color, wx_icon);
-                                    ui.colored_label(egui::Color32::WHITE, &gs.name);
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.colored_label(wx_color, weather_name.to_uppercase());
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(wx_color, wx_icon);
+                                        ui.colored_label(egui::Color32::WHITE, &gs.name);
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.colored_label(
+                                                    wx_color,
+                                                    weather_name.to_uppercase(),
+                                                );
+                                            },
+                                        );
                                     });
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.small(format!("Throughput: {:.1} Gbps", total_gbps));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let cap_str = if gs.downlink_nominal_gbps.is_infinite() {
-                                            "Illimitata".to_string()
-                                        } else {
-                                            format!("{:.1} Gbps", gs.downlink_nominal_gbps)
-                                        };
-                                        ui.small(format!("Cap: {}", cap_str));
+                                    ui.horizontal(|ui| {
+                                        ui.small(format!("Throughput: {:.1} Gbps", total_gbps));
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let cap_str = if gs
+                                                    .downlink_nominal_gbps
+                                                    .is_infinite()
+                                                {
+                                                    "Illimitata".to_string()
+                                                } else {
+                                                    format!("{:.1} Gbps", gs.downlink_nominal_gbps)
+                                                };
+                                                ui.small(format!("Cap: {}", cap_str));
+                                            },
+                                        );
                                     });
-                                });
-                                if !connected.is_empty() {
-                                    ui.separator();
-                                    for (sat_id, _, speed, _) in connected {
-                                        // Compute Az/El/Dist of this satellite as seen from the GS
-                                        if let Some(sat) = self.find_satellite(sat_id) {
-                                            let gst = self.current_time * 7.292115e-5;
-                                            let rot = eci_to_ecef_matrix(gst);
-                                            let rot_t = [[rot[0][0],rot[1][0],rot[2][0]],[rot[0][1],rot[1][1],rot[2][1]],[rot[0][2],rot[1][2],rot[2][2]]];
-                                            let gs_ecef = lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
-                                            let gs_eci_pos = mat_vec_mult(rot_t, gs_ecef);
-                                            let (az, el, dist) = az_el_dist(gs_eci_pos, gs.lat_rad, gs.lon_rad + gst, sat.r);
-                                            ui.small(format!("  • {} {:.1} Gbps", sat_id, speed));
-                                            ui.small(format!("    Az {:.1}°  El {:.1}°  Dist {:.0} km", az, el, dist));
-                                        } else {
-                                            ui.small(format!("  • {}: {:.1} Gbps", sat_id, speed));
+                                    if !connected.is_empty() {
+                                        ui.separator();
+                                        for (sat_id, _, speed, _) in connected {
+                                            // Compute Az/El/Dist of this satellite as seen from the GS
+                                            if let Some(sat) = self.find_satellite(sat_id) {
+                                                let gst = self.current_time * 7.292115e-5;
+                                                let rot = eci_to_ecef_matrix(gst);
+                                                let rot_t = [
+                                                    [rot[0][0], rot[1][0], rot[2][0]],
+                                                    [rot[0][1], rot[1][1], rot[2][1]],
+                                                    [rot[0][2], rot[1][2], rot[2][2]],
+                                                ];
+                                                let gs_ecef =
+                                                    lla_to_ecef(gs.lat_rad, gs.lon_rad, gs.alt_m);
+                                                let gs_eci_pos = mat_vec_mult(rot_t, gs_ecef);
+                                                let (az, el, dist) = az_el_dist(
+                                                    gs_eci_pos,
+                                                    gs.lat_rad,
+                                                    gs.lon_rad + gst,
+                                                    sat.r,
+                                                );
+                                                ui.small(format!(
+                                                    "  • {} {:.1} Gbps",
+                                                    sat_id, speed
+                                                ));
+                                                ui.small(format!(
+                                                    "    Az {:.1}°  El {:.1}°  Dist {:.0} km",
+                                                    az, el, dist
+                                                ));
+                                            } else {
+                                                ui.small(format!(
+                                                    "  • {}: {:.1} Gbps",
+                                                    sat_id, speed
+                                                ));
+                                            }
                                         }
                                     }
-                                }
-                            });
-                        }
-                    });
-                });
-            self.show_stations_hud = open;
-        }
-
-        if self.show_leo_list_hud {
-            let mut open = self.show_leo_list_hud;
-            make_window!("📶 Bitrates", &mut open, egui::pos2(50.0, 480.0), egui::vec2(280.0, 200.0))
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().id_source("hud_bitrates_scroll").show(ui, |ui| {
-                        ui.label(egui::RichText::new("SATELLITES").strong().color(egui::Color32::LIGHT_BLUE));
-                        
-                        let mut all_sats = Vec::new();
-                        for seg in &self.constellation.segments {
-                            for sat in &seg.satellites {
-                                all_sats.push(sat.id.clone());
+                                });
                             }
-                        }
-                        all_sats.sort();
-
-                        for sat_id in all_sats {
-                            let sgl_info = sat_sgl_link.get(&sat_id);
-                            let _isl_info = sat_isl_link.get(&sat_id);
-                            let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0) + _isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
-                            
-                            let color = if total_speed > 50.0 {
-                                egui::Color32::from_rgb(34, 197, 94)
-                            } else if total_speed > 0.0 {
-                                egui::Color32::from_rgb(234, 179, 8)
-                            } else {
-                                egui::Color32::from_rgb(156, 163, 175)
-                            };
-
-                            ui.horizontal(|ui| {
-                                let is_selected = sat_id == self.selected_satellite_id;
-                                if ui.selectable_label(is_selected, &sat_id).clicked() {
-                                    self.selected_satellite_id = sat_id.clone();
-                                    self.update_input_fields_for_selected();
-                                }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.colored_label(color, format!("{:.1} Gbps", total_speed));
-                                });
-                            });
-                        }
-
-                        ui.separator();
-                        ui.label(egui::RichText::new("GROUND STATIONS").strong().color(egui::Color32::LIGHT_BLUE));
-
-                        for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
-                            let total_speed = gs_throughputs[gs_idx] as f64;
-                            let color = if total_speed > 50.0 {
-                                egui::Color32::from_rgb(34, 197, 94)
-                            } else if total_speed > 0.0 {
-                                egui::Color32::from_rgb(234, 179, 8)
-                            } else {
-                                egui::Color32::from_rgb(156, 163, 175)
-                            };
-                            ui.horizontal(|ui| {
-                                ui.label(&gs.name);
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.colored_label(color, format!("{:.1} Gbps", total_speed));
-                                });
-                            });
-                        }
-                    });
+                        });
                 });
-            self.show_leo_list_hud = open;
-        }
+                self.show_stations_hud = open;
+            }
 
-        if self.show_logs_hud {
-            let mut open = self.show_logs_hud;
-            make_window!("💻 Console di Sistema", &mut open, egui::pos2(850.0, 500.0), egui::vec2(280.0, 180.0))
+            if self.show_leo_list_hud {
+                let mut open = self.show_leo_list_hud;
+                make_window!(
+                    "📶 Bitrates",
+                    &mut open,
+                    egui::pos2(50.0, 480.0),
+                    egui::vec2(280.0, 200.0)
+                )
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                        for log_msg in &self.logs {
-                            ui.label(log_msg);
-                        }
-                    });
+                    egui::ScrollArea::vertical()
+                        .id_source("hud_bitrates_scroll")
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("SATELLITES")
+                                    .strong()
+                                    .color(egui::Color32::LIGHT_BLUE),
+                            );
+
+                            let mut all_sats = Vec::new();
+                            for seg in &self.constellation.segments {
+                                for sat in &seg.satellites {
+                                    all_sats.push(sat.id.clone());
+                                }
+                            }
+                            all_sats.sort();
+
+                            for sat_id in all_sats {
+                                let sgl_info = sat_sgl_link.get(&sat_id);
+                                let _isl_info = sat_isl_link.get(&sat_id);
+                                let total_speed = sgl_info.map(|(_, cap)| *cap).unwrap_or(0.0)
+                                    + _isl_info.map(|(_, cap)| *cap).unwrap_or(0.0);
+
+                                let color = if total_speed > 50.0 {
+                                    egui::Color32::from_rgb(34, 197, 94)
+                                } else if total_speed > 0.0 {
+                                    egui::Color32::from_rgb(234, 179, 8)
+                                } else {
+                                    egui::Color32::from_rgb(156, 163, 175)
+                                };
+
+                                ui.horizontal(|ui| {
+                                    let is_selected = sat_id == self.selected_satellite_id;
+                                    if ui.selectable_label(is_selected, &sat_id).clicked() {
+                                        self.selected_satellite_id = sat_id.clone();
+                                        self.update_input_fields_for_selected();
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.colored_label(
+                                                color,
+                                                format!("{:.1} Gbps", total_speed),
+                                            );
+                                        },
+                                    );
+                                });
+                            }
+
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new("GROUND STATIONS")
+                                    .strong()
+                                    .color(egui::Color32::LIGHT_BLUE),
+                            );
+
+                            for (gs_idx, gs) in self.ground_stations.iter().enumerate() {
+                                let total_speed = gs_throughputs[gs_idx] as f64;
+                                let color = if total_speed > 50.0 {
+                                    egui::Color32::from_rgb(34, 197, 94)
+                                } else if total_speed > 0.0 {
+                                    egui::Color32::from_rgb(234, 179, 8)
+                                } else {
+                                    egui::Color32::from_rgb(156, 163, 175)
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label(&gs.name);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.colored_label(
+                                                color,
+                                                format!("{:.1} Gbps", total_speed),
+                                            );
+                                        },
+                                    );
+                                });
+                            }
+                        });
                 });
-            self.show_logs_hud = open;
-        }
+                self.show_leo_list_hud = open;
+            }
+
+            if self.show_logs_hud {
+                let mut open = self.show_logs_hud;
+                make_window!(
+                    "💻 Console di Sistema",
+                    &mut open,
+                    egui::pos2(850.0, 500.0),
+                    egui::vec2(280.0, 180.0)
+                )
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for log_msg in &self.logs {
+                                ui.label(log_msg);
+                            }
+                        });
+                });
+                self.show_logs_hud = open;
+            }
         }
 
         // Throughput chart panel: height is relative to the window and can be dragged
@@ -2425,20 +2743,15 @@ impl eframe::App for HydronGuiApp {
             .height_range(90.0..=chart_max_h)
             .show(ctx, |ui| {
                 ui.heading("📊 Grafico Storico Throughput Stazioni di Terra");
-                let (rect, _response) = ui.allocate_exact_size(
-                    ui.available_size(),
-                    egui::Sense::hover()
-                );
+                let (rect, _response) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
                 self.draw_throughput_chart(ui, rect);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Visualizzazione Costellazione 3D (Trascina per ruotare il globo)");
-            
-            let (rect, response) = ui.allocate_exact_size(
-                ui.available_size(),
-                egui::Sense::drag()
-            );
+
+            let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
 
             if response.hovered() {
                 let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
@@ -2473,7 +2786,7 @@ impl eframe::App for HydronGuiApp {
             }
 
             let center = rect.center();
-            
+
             let max_r = self.config.env.r_earth + self.config.geo_alt_km * 1000.0;
             let screen_dim = rect.width().min(rect.height());
             let scale = ((screen_dim * 0.45) as f64 / max_r) * (self.map_zoom as f64);
@@ -2549,7 +2862,8 @@ impl eframe::App for HydronGuiApp {
             if rotate_globe && response.dragged() {
                 let delta = response.drag_delta();
                 self.map_yaw += delta.x * 0.005;
-                self.map_pitch = (self.map_pitch - delta.y * 0.005).clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+                self.map_pitch = (self.map_pitch - delta.y * 0.005)
+                    .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
             }
 
             // Draw Earth (textured 3D sphere mesh, or fallback to solid blue circle)
@@ -2570,17 +2884,21 @@ impl eframe::App for HydronGuiApp {
             if let Some(ref texture) = self.earth_texture {
                 let n_lat = 32;
                 let n_lon = 64;
-                let mut projected_vertices = vec![vec![(egui::pos2(0.0, 0.0), 0.0); n_lon + 1]; n_lat + 1];
+                let mut projected_vertices =
+                    vec![vec![(egui::pos2(0.0, 0.0), 0.0); n_lon + 1]; n_lat + 1];
                 for i in 0..=n_lat {
-                    let lat_rad = -std::f64::consts::FRAC_PI_2 + (i as f64) * std::f64::consts::PI / (n_lat as f64);
+                    let lat_rad = -std::f64::consts::FRAC_PI_2
+                        + (i as f64) * std::f64::consts::PI / (n_lat as f64);
                     let z = r_earth * lat_rad.sin();
                     let r_lat = r_earth * lat_rad.cos();
-                    
+
                     for j in 0..=n_lon {
-                        let lon_rad = (j as f64) * 2.0 * std::f64::consts::PI / (n_lon as f64) + gst + 180.0_f64.to_radians();
+                        let lon_rad = (j as f64) * 2.0 * std::f64::consts::PI / (n_lon as f64)
+                            + gst
+                            + 180.0_f64.to_radians();
                         let x = r_lat * lon_rad.cos();
                         let y = r_lat * lon_rad.sin();
-                        
+
                         projected_vertices[i][j] = project_3d([x, y, z]);
                     }
                 }
@@ -2591,29 +2909,30 @@ impl eframe::App for HydronGuiApp {
                 for i in 0..n_lat {
                     for j in 0..n_lon {
                         let p00 = projected_vertices[i][j];
-                        let p10 = projected_vertices[i+1][j];
-                        let p01 = projected_vertices[i][j+1];
-                        let p11 = projected_vertices[i+1][j+1];
+                        let p10 = projected_vertices[i + 1][j];
+                        let p01 = projected_vertices[i][j + 1];
+                        let p11 = projected_vertices[i + 1][j + 1];
 
                         let avg_z = (p00.1 + p10.1 + p01.1 + p11.1) / 4.0;
                         if avg_z > 0.0 {
-                            let mut add_vertex = |row: usize, col: usize, mesh: &mut egui::Mesh| -> u32 {
-                                if vertex_indices[row][col] == u32::MAX {
-                                    let (pos, _) = projected_vertices[row][col];
-                                    let u = col as f32 / n_lon as f32;
-                                    let v = 1.0 - (row as f32 / n_lat as f32);
-                                    let idx = mesh.vertices.len() as u32;
-                                    mesh.vertices.push(egui::epaint::Vertex {
-                                        pos,
-                                        uv: egui::pos2(u, v),
-                                        color: egui::Color32::WHITE,
-                                    });
-                                    vertex_indices[row][col] = idx;
-                                    idx
-                                } else {
-                                    vertex_indices[row][col]
-                                }
-                            };
+                            let mut add_vertex =
+                                |row: usize, col: usize, mesh: &mut egui::Mesh| -> u32 {
+                                    if vertex_indices[row][col] == u32::MAX {
+                                        let (pos, _) = projected_vertices[row][col];
+                                        let u = col as f32 / n_lon as f32;
+                                        let v = 1.0 - (row as f32 / n_lat as f32);
+                                        let idx = mesh.vertices.len() as u32;
+                                        mesh.vertices.push(egui::epaint::Vertex {
+                                            pos,
+                                            uv: egui::pos2(u, v),
+                                            color: egui::Color32::WHITE,
+                                        });
+                                        vertex_indices[row][col] = idx;
+                                        idx
+                                    } else {
+                                        vertex_indices[row][col]
+                                    }
+                                };
 
                             let idx00 = add_vertex(i, j, &mut mesh);
                             let idx10 = add_vertex(i + 1, j, &mut mesh);
@@ -2627,9 +2946,17 @@ impl eframe::App for HydronGuiApp {
                 }
                 painter.add(mesh);
             } else {
-                painter.circle_filled(center, earth_radius_px, egui::Color32::from_rgb(15, 76, 129));
+                painter.circle_filled(
+                    center,
+                    earth_radius_px,
+                    egui::Color32::from_rgb(15, 76, 129),
+                );
             }
-            painter.circle_stroke(center, earth_radius_px, egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)));
+            painter.circle_stroke(
+                center,
+                earth_radius_px,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)),
+            );
 
             // Draw Earth's yellow latitude/longitude grid
             let grid_color = egui::Color32::from_rgba_unmultiplied(253, 224, 71, 100); // Yellow grid lines
@@ -2641,14 +2968,14 @@ impl eframe::App for HydronGuiApp {
                 let lat_rad = (lat_deg as f64).to_radians();
                 let z = r_earth * lat_rad.sin();
                 let r_lat = r_earth * lat_rad.cos();
-                
+
                 let mut prev_pt: Option<egui::Pos2> = None;
                 let steps = 72;
                 for step in 0..=steps {
                     let lon_rad = (step as f64 * 360.0 / steps as f64).to_radians() + gst;
                     let x = r_lat * lon_rad.cos();
                     let y = r_lat * lon_rad.sin();
-                    
+
                     let (screen_pos, rot_z) = project_3d([x, y, z]);
                     if rot_z > 0.0 {
                         if let Some(prev) = prev_pt {
@@ -2664,15 +2991,15 @@ impl eframe::App for HydronGuiApp {
             // Meridians (longitude lines)
             for lon_deg in (0..360).step_by(30) {
                 let lon_rad = (lon_deg as f64).to_radians() + gst;
-                
+
                 let mut prev_pt: Option<egui::Pos2> = None;
                 let steps = 72;
-                for step in -steps/2..=steps/2 {
+                for step in -steps / 2..=steps / 2 {
                     let lat_rad = (step as f64 * 90.0 / (steps as f64 / 2.0)).to_radians();
                     let x = r_earth * lat_rad.cos() * lon_rad.cos();
                     let y = r_earth * lat_rad.cos() * lon_rad.sin();
                     let z = r_earth * lat_rad.sin();
-                    
+
                     let (screen_pos, rot_z) = project_3d([x, y, z]);
                     if rot_z > 0.0 {
                         if let Some(prev) = prev_pt {
@@ -2691,16 +3018,19 @@ impl eframe::App for HydronGuiApp {
             let (axis_south_px, south_z) = project_3d([0.0, 0.0, -axis_len]);
             painter.line_segment(
                 [axis_south_px, axis_north_px],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(100, 116, 139, 100))
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(100, 116, 139, 100),
+                ),
             );
-            
+
             if north_z > 0.0 {
                 painter.text(
                     axis_north_px,
                     egui::Align2::CENTER_CENTER,
                     "N",
                     egui::FontId::proportional(11.0),
-                    egui::Color32::from_rgb(56, 189, 248)
+                    egui::Color32::from_rgb(56, 189, 248),
                 );
             }
             if south_z > 0.0 {
@@ -2709,35 +3039,37 @@ impl eframe::App for HydronGuiApp {
                     egui::Align2::CENTER_CENTER,
                     "S",
                     egui::FontId::proportional(11.0),
-                    egui::Color32::from_rgb(239, 68, 68)
+                    egui::Color32::from_rgb(239, 68, 68),
                 );
             }
 
             // Draw Orbit paths dynamically from satellite parameters
-            let draw_orbit_from_sat = |painter: &egui::Painter, sat: &Satellite, color: egui::Color32| {
+            let draw_orbit_from_sat = |painter: &egui::Painter,
+                                       sat: &Satellite,
+                                       color: egui::Color32| {
                 let r = sat.r;
                 let v = sat.v;
-                let r_mag = (r[0]*r[0] + r[1]*r[1] + r[2]*r[2]).sqrt();
-                let h_x = r[1]*v[2] - r[2]*v[1];
-                let h_y = r[2]*v[0] - r[0]*v[2];
-                let h_z = r[0]*v[1] - r[1]*v[0];
-                let h_mag = (h_x*h_x + h_y*h_y + h_z*h_z).sqrt();
+                let r_mag = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+                let h_x = r[1] * v[2] - r[2] * v[1];
+                let h_y = r[2] * v[0] - r[0] * v[2];
+                let h_z = r[0] * v[1] - r[1] * v[0];
+                let h_mag = (h_x * h_x + h_y * h_y + h_z * h_z).sqrt();
                 if h_mag < 1e-9 {
                     return;
                 }
                 let c_i = h_z / h_mag;
-                let s_i = (1.0 - c_i*c_i).max(0.0).sqrt();
-                
+                let s_i = (1.0 - c_i * c_i).max(0.0).sqrt();
+
                 // Node vector: n = k x h = [-h_y, h_x, 0]
                 let n_x = -h_y;
                 let n_y = h_x;
-                let n_mag = (n_x*n_x + n_y*n_y).sqrt();
+                let n_mag = (n_x * n_x + n_y * n_y).sqrt();
                 let (c_r, s_r) = if n_mag > 1e-9 {
                     (n_x / n_mag, n_y / n_mag)
                 } else {
                     (1.0, 0.0)
                 };
-                
+
                 let mut prev_pt: Option<egui::Pos2> = None;
                 let steps = 120;
                 for step in 0..=steps {
@@ -2746,21 +3078,22 @@ impl eframe::App for HydronGuiApp {
                     let r_eci = [
                         c_r * r_plane[0] - s_r * c_i * r_plane[1],
                         s_r * r_plane[0] + c_r * c_i * r_plane[1],
-                        s_i * r_plane[1]
+                        s_i * r_plane[1],
                     ];
                     let (screen_pos, rot_z) = project_3d(r_eci);
-                    
+
                     let dist = screen_pos.distance(center);
                     let occluded = rot_z < 0.0 && dist < earth_radius_px;
-                    
+
                     let stroke_color = if occluded {
                         color.linear_multiply(0.12)
                     } else {
                         color.linear_multiply(0.4)
                     };
-                    
+
                     if let Some(prev) = prev_pt {
-                        painter.line_segment([prev, screen_pos], egui::Stroke::new(1.0, stroke_color));
+                        painter
+                            .line_segment([prev, screen_pos], egui::Stroke::new(1.0, stroke_color));
                     }
                     prev_pt = Some(screen_pos);
                 }
@@ -2810,7 +3143,15 @@ impl eframe::App for HydronGuiApp {
             for seg in &self.constellation.segments {
                 for sat in &seg.satellites {
                     let (sat_pos_px, rot_z) = project_3d(sat.r);
-                    satellites_screen.push((sat.id.clone(), sat.orbit_type.clone(), sat_pos_px, sat.r, rot_z, sat.is_custom, sat.custom_color));
+                    satellites_screen.push((
+                        sat.id.clone(),
+                        sat.orbit_type.clone(),
+                        sat_pos_px,
+                        sat.r,
+                        rot_z,
+                        sat.is_custom,
+                        sat.custom_color,
+                    ));
                 }
             }
 
@@ -2829,10 +3170,18 @@ impl eframe::App for HydronGuiApp {
                 let (id1, _, _) = &all_sats[i];
                 let (id2, _, _) = &all_sats[j];
 
-                let pos1 = satellites_screen.iter().find(|(id, _, _, _, _, _, _)| id == id1);
-                let pos2 = satellites_screen.iter().find(|(id, _, _, _, _, _, _)| id == id2);
+                let pos1 = satellites_screen
+                    .iter()
+                    .find(|(id, _, _, _, _, _, _)| id == id1);
+                let pos2 = satellites_screen
+                    .iter()
+                    .find(|(id, _, _, _, _, _, _)| id == id2);
 
-                if let (Some((_, _, pos1_px, _, rot_z1, _, _)), Some((_, _, pos2_px, _, rot_z2, _, _))) = (pos1, pos2) {
+                if let (
+                    Some((_, _, pos1_px, _, rot_z1, _, _)),
+                    Some((_, _, pos2_px, _, rot_z2, _, _)),
+                ) = (pos1, pos2)
+                {
                     let color = if capacity > 5.0 {
                         egui::Color32::from_rgb(34, 197, 94)
                     } else if capacity > 1.0 {
@@ -2840,30 +3189,30 @@ impl eframe::App for HydronGuiApp {
                     } else {
                         egui::Color32::from_rgb(239, 68, 68)
                     };
-                    
+
                     let dist1 = pos1_px.distance(center);
                     let dist2 = pos2_px.distance(center);
                     let occluded1 = *rot_z1 < 0.0 && dist1 < earth_radius_px;
                     let occluded2 = *rot_z2 < 0.0 && dist2 < earth_radius_px;
-                    
+
                     let link_stroke = if occluded1 || occluded2 {
                         egui::Stroke::new(1.0, color.linear_multiply(0.12))
                     } else {
                         egui::Stroke::new(1.0, color.linear_multiply(0.4))
                     };
-                    
+
                     painter.line_segment([*pos1_px, *pos2_px], link_stroke);
 
                     // Animated signals traveling along active ISL links
                     let pulse_t = (self.current_time * 2.0) % 1.0;
                     let px = pos1_px.x + (pos2_px.x - pos1_px.x) * (pulse_t as f32);
                     let py = pos1_px.y + (pos2_px.y - pos1_px.y) * (pulse_t as f32);
-                    
+
                     let pulse_alpha = if occluded1 || occluded2 { 40 } else { 255 };
                     painter.circle_filled(
                         egui::pos2(px, py),
                         2.0,
-                        color.linear_multiply(pulse_alpha as f32 / 255.0)
+                        color.linear_multiply(pulse_alpha as f32 / 255.0),
                     );
                 }
             }
@@ -2892,9 +3241,15 @@ impl eframe::App for HydronGuiApp {
 
                     for (gs_id, gs_pos_px, gs_r, gs_k, gs_rot_z) in &stations_screen {
                         let capacity = compute_link_capacity(
-                            *sat_r, *gs_r, true, *gs_k,
-                            sat_ref_dist, sat_max_speed, &self.config.env
-                        ).min(sat_max_speed);
+                            *sat_r,
+                            *gs_r,
+                            true,
+                            *gs_k,
+                            sat_ref_dist,
+                            sat_max_speed,
+                            &self.config.env,
+                        )
+                        .min(sat_max_speed);
 
                         if capacity > max_capacity {
                             max_capacity = capacity;
@@ -2916,27 +3271,45 @@ impl eframe::App for HydronGuiApp {
                         let sat_dist = sat_pos_px.distance(center);
                         let sat_occluded = *sat_rot_z < 0.0 && sat_dist < earth_radius_px;
                         let gs_occluded = best_gs_rot_z <= 0.0;
-                        
+
                         let base_alpha = if sat_occluded || gs_occluded { 15 } else { 255 };
                         let glow1_alpha = if sat_occluded || gs_occluded { 5 } else { 25 };
                         let glow2_alpha = if sat_occluded || gs_occluded { 10 } else { 60 };
 
-                        let base_color = egui::Color32::from_rgba_unmultiplied(beam_r, beam_g, beam_b, base_alpha);
+                        let base_color = egui::Color32::from_rgba_unmultiplied(
+                            beam_r, beam_g, beam_b, base_alpha,
+                        );
 
                         // Outer glow
                         painter.line_segment(
                             [*sat_pos_px, best_gs_pos_px],
-                            egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(beam_r, beam_g, beam_b, glow1_alpha))
+                            egui::Stroke::new(
+                                5.0,
+                                egui::Color32::from_rgba_unmultiplied(
+                                    beam_r,
+                                    beam_g,
+                                    beam_b,
+                                    glow1_alpha,
+                                ),
+                            ),
                         );
                         // Mid glow
                         painter.line_segment(
                             [*sat_pos_px, best_gs_pos_px],
-                            egui::Stroke::new(2.5, egui::Color32::from_rgba_unmultiplied(beam_r, beam_g, beam_b, glow2_alpha))
+                            egui::Stroke::new(
+                                2.5,
+                                egui::Color32::from_rgba_unmultiplied(
+                                    beam_r,
+                                    beam_g,
+                                    beam_b,
+                                    glow2_alpha,
+                                ),
+                            ),
                         );
                         // Core laser line
                         painter.line_segment(
                             [*sat_pos_px, best_gs_pos_px],
-                            egui::Stroke::new(1.0, base_color)
+                            egui::Stroke::new(1.0, base_color),
                         );
 
                         // Animated signals traveling along active SGL links
@@ -2945,11 +3318,13 @@ impl eframe::App for HydronGuiApp {
                             let progress = (pulse_t as f32 + p_idx as f32 * 0.5) % 1.0;
                             let px = sat_pos_px.x + (best_gs_pos_px.x - sat_pos_px.x) * progress;
                             let py = sat_pos_px.y + (best_gs_pos_px.y - sat_pos_px.y) * progress;
-                            
+
                             painter.circle_filled(
                                 egui::pos2(px, py),
                                 2.5,
-                                egui::Color32::from_rgba_unmultiplied(beam_r, beam_g, beam_b, base_alpha)
+                                egui::Color32::from_rgba_unmultiplied(
+                                    beam_r, beam_g, beam_b, base_alpha,
+                                ),
                             );
                         }
 
@@ -2982,23 +3357,25 @@ impl eframe::App for HydronGuiApp {
                 } else {
                     egui::Color32::from_rgb(239, 68, 68)
                 };
-                
+
                 painter.rect_filled(
                     egui::Rect::from_center_size(*gs_pos_px, egui::vec2(8.0, 8.0)),
                     1.0,
-                    color
+                    color,
                 );
-                
+
                 painter.text(
                     egui::pos2(gs_pos_px.x + 8.0, gs_pos_px.y - 4.0),
                     egui::Align2::LEFT_TOP,
                     gs_id,
                     egui::FontId::proportional(10.0),
-                    egui::Color32::LIGHT_GRAY
+                    egui::Color32::LIGHT_GRAY,
                 );
             }
 
-            for (sat_id, _type, sat_pos_px, _r, rot_z, is_custom, custom_color) in &satellites_screen {
+            for (sat_id, _type, sat_pos_px, _r, rot_z, is_custom, custom_color) in
+                &satellites_screen
+            {
                 let color = if let (true, Some([r, g, b])) = (*is_custom, custom_color) {
                     egui::Color32::from_rgb(*r, *g, *b)
                 } else if *is_custom {
@@ -3017,11 +3394,11 @@ impl eframe::App for HydronGuiApp {
 
                 let is_selected = *sat_id == self.selected_satellite_id;
                 let size = if is_selected { 6.0 } else { 4.0 };
-                
+
                 // Occlusion check
                 let dist_from_center = sat_pos_px.distance(center);
                 let occluded = *rot_z < 0.0 && dist_from_center < earth_radius_px;
-                
+
                 let alpha = if occluded { 40 } else { 255 };
                 let color_with_alpha = color.linear_multiply(alpha as f32 / 255.0);
 
@@ -3030,7 +3407,11 @@ impl eframe::App for HydronGuiApp {
                     painter.circle_stroke(
                         *sat_pos_px,
                         size + 3.0,
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(250, 204, 21).linear_multiply(ring_alpha as f32 / 255.0))
+                        egui::Stroke::new(
+                            1.5,
+                            egui::Color32::from_rgb(250, 204, 21)
+                                .linear_multiply(ring_alpha as f32 / 255.0),
+                        ),
                     );
                 }
 
@@ -3047,7 +3428,7 @@ impl eframe::App for HydronGuiApp {
                         egui::Align2::LEFT_TOP,
                         sat_id,
                         egui::FontId::proportional(10.0),
-                        text_color
+                        text_color,
                     );
                 }
             }
@@ -3079,7 +3460,8 @@ impl eframe::App for HydronGuiApp {
                 k_value: self.config.atmos_k[0] / 1000.0,
             });
             self.weather_overrides.push(Some(0));
-            self.history_stations.push(vec![0.0f32; self.history_time.len()]);
+            self.history_stations
+                .push(vec![0.0f32; self.history_time.len()]);
             self.log(&format!("Aggiunta stazione {}", new_name));
         }
 
@@ -3111,43 +3493,50 @@ impl eframe::App for HydronGuiApp {
                 Vec::new()
             };
 
-            let custom_leo: Vec<Satellite> = self.constellation.segments[0].satellites.iter()
+            let custom_leo: Vec<Satellite> = self.constellation.segments[0]
+                .satellites
+                .iter()
                 .filter(|sat| sat.is_custom)
                 .cloned()
                 .collect();
-            let custom_meo: Vec<Satellite> = self.constellation.segments[1].satellites.iter()
+            let custom_meo: Vec<Satellite> = self.constellation.segments[1]
+                .satellites
+                .iter()
                 .filter(|sat| sat.is_custom)
                 .cloned()
                 .collect();
-            let custom_geo: Vec<Satellite> = self.constellation.segments[2].satellites.iter()
+            let custom_geo: Vec<Satellite> = self.constellation.segments[2]
+                .satellites
+                .iter()
                 .filter(|sat| sat.is_custom)
                 .cloned()
                 .collect();
 
             self.constellation = create_satellites_from_config(&self.config);
 
-            let insert_custom_avoiding_clash = |seg_idx: usize, custom_sats: Vec<Satellite>, segments: &mut Vec<Segment>| {
-                for mut sat in custom_sats {
-                    let mut final_id = sat.id.clone();
-                    let mut sat_idx_counter = segments[seg_idx].satellites.len();
-                    loop {
-                        let mut clash = false;
-                        for s in &segments[seg_idx].satellites {
-                            if s.id == final_id {
-                                clash = true;
+            let insert_custom_avoiding_clash =
+                |seg_idx: usize, custom_sats: Vec<Satellite>, segments: &mut Vec<Segment>| {
+                    for mut sat in custom_sats {
+                        let mut final_id = sat.id.clone();
+                        let mut sat_idx_counter = segments[seg_idx].satellites.len();
+                        loop {
+                            let mut clash = false;
+                            for s in &segments[seg_idx].satellites {
+                                if s.id == final_id {
+                                    clash = true;
+                                    break;
+                                }
+                            }
+                            if !clash {
                                 break;
                             }
+                            final_id = format!("{:?}_{:02}", sat.orbit_type, sat_idx_counter);
+                            sat_idx_counter += 1;
                         }
-                        if !clash {
-                            break;
-                        }
-                        final_id = format!("{:?}_{:02}", sat.orbit_type, sat_idx_counter);
-                        sat_idx_counter += 1;
+                        sat.id = final_id;
+                        segments[seg_idx].satellites.push(sat);
                     }
-                    sat.id = final_id;
-                    segments[seg_idx].satellites.push(sat);
-                }
-            };
+                };
 
             let segments_mut = &mut self.constellation.segments;
             insert_custom_avoiding_clash(0, custom_leo, segments_mut);
@@ -3219,12 +3608,53 @@ pub fn default_config() -> Config {
         geo_cd: 0.0,
         geo_cr: 1.2,
         stations: vec![
-            GroundStation { id: "GS_SVA".to_string(), name: "Svalbard".to_string(), lat_rad: 78.2307f64.to_radians(), lon_rad: 15.6472f64.to_radians(), alt_m: 130.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
-            GroundStation { id: "GS_ZRH".to_string(), name: "Zurich".to_string(), lat_rad: 47.4647f64.to_radians(), lon_rad:  8.5492f64.to_radians(), alt_m: 400.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
-            GroundStation { id: "GS_REU".to_string(), name: "Reunion".to_string(), lat_rad: -20.9089f64.to_radians(), lon_rad: 55.5136f64.to_radians(), alt_m: 95.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
-            GroundStation { id: "GS_MAU".to_string(), name: "Maui".to_string(), lat_rad: 20.7067f64.to_radians(), lon_rad: -156.257f64.to_radians(), alt_m: 100.0, downlink_nominal_gbps: f64::INFINITY, atmos_state: 0, k_value: 0.05 / 1000.0 },
+            GroundStation {
+                id: "GS_SVA".to_string(),
+                name: "Svalbard".to_string(),
+                lat_rad: 78.2307f64.to_radians(),
+                lon_rad: 15.6472f64.to_radians(),
+                alt_m: 130.0,
+                downlink_nominal_gbps: f64::INFINITY,
+                atmos_state: 0,
+                k_value: 0.05 / 1000.0,
+            },
+            GroundStation {
+                id: "GS_ZRH".to_string(),
+                name: "Zurich".to_string(),
+                lat_rad: 47.4647f64.to_radians(),
+                lon_rad: 8.5492f64.to_radians(),
+                alt_m: 400.0,
+                downlink_nominal_gbps: f64::INFINITY,
+                atmos_state: 0,
+                k_value: 0.05 / 1000.0,
+            },
+            GroundStation {
+                id: "GS_REU".to_string(),
+                name: "Reunion".to_string(),
+                lat_rad: -20.9089f64.to_radians(),
+                lon_rad: 55.5136f64.to_radians(),
+                alt_m: 95.0,
+                downlink_nominal_gbps: f64::INFINITY,
+                atmos_state: 0,
+                k_value: 0.05 / 1000.0,
+            },
+            GroundStation {
+                id: "GS_MAU".to_string(),
+                name: "Maui".to_string(),
+                lat_rad: 20.7067f64.to_radians(),
+                lon_rad: -156.257f64.to_radians(),
+                alt_m: 100.0,
+                downlink_nominal_gbps: f64::INFINITY,
+                atmos_state: 0,
+                k_value: 0.05 / 1000.0,
+            },
         ],
-        atmos_states: vec!["clear".to_string(), "thin".to_string(), "thick".to_string(), "heavy".to_string()],
+        atmos_states: vec![
+            "clear".to_string(),
+            "thin".to_string(),
+            "thick".to_string(),
+            "heavy".to_string(),
+        ],
         atmos_k: vec![0.05, 0.2, 1.5, 5.0],
         transition_matrix: vec![
             vec![0.85, 0.10, 0.04, 0.01],

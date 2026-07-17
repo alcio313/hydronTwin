@@ -1,11 +1,8 @@
-use crate::models::{Satellite, GroundStation, AtmosphereModel, SimEnvironment};
 use crate::math::*;
+use crate::models::{AtmosphereModel, GroundStation, Satellite, SimEnvironment};
 
 pub fn step_orbit(sat: &mut Satellite, dt: f64, env: &SimEnvironment, sun_vector: [f64; 3]) {
-    let mut state = [
-        sat.r[0], sat.r[1], sat.r[2],
-        sat.v[0], sat.v[1], sat.v[2]
-    ];
+    let mut state = [sat.r[0], sat.r[1], sat.r[2], sat.v[0], sat.v[1], sat.v[2]];
 
     let mass = sat.mass;
     let cd = sat.cd;
@@ -41,13 +38,13 @@ pub fn step_orbit(sat: &mut Satellite, dt: f64, env: &SimEnvironment, sun_vector
             let h0_m = env.h0_km * 1000.0;
             let scale_height_m = env.scale_height_km * 1000.0;
             let rho = env.rho0_500km * (-(altitude - h0_m) / scale_height_m).exp();
-            
+
             // Relative velocity vector (assuming Earth's atmosphere co-rotates with Earth)
             let omega_earth = [0.0, 0.0, 7.292115e-5];
             let v_rel = [
                 v_vec[0] - (-omega_earth[2] * r_vec[1]),
                 v_vec[1] - (omega_earth[2] * r_vec[0]),
-                v_vec[2]
+                v_vec[2],
             ];
             let v_rel_len = norm(v_rel);
             let a_drag = scale(v_rel, -0.5 * rho * cd * area / mass * v_rel_len);
@@ -68,13 +65,19 @@ pub fn step_orbit(sat: &mut Satellite, dt: f64, env: &SimEnvironment, sun_vector
     // RK4 numerical integration
     let k1 = deriv(&state);
     let mut x2 = [0.0; 6];
-    for i in 0..6 { x2[i] = state[i] + 0.5 * dt * k1[i]; }
+    for i in 0..6 {
+        x2[i] = state[i] + 0.5 * dt * k1[i];
+    }
     let k2 = deriv(&x2);
     let mut x3 = [0.0; 6];
-    for i in 0..6 { x3[i] = state[i] + 0.5 * dt * k2[i]; }
+    for i in 0..6 {
+        x3[i] = state[i] + 0.5 * dt * k2[i];
+    }
     let k3 = deriv(&x3);
     let mut x4 = [0.0; 6];
-    for i in 0..6 { x4[i] = state[i] + dt * k3[i]; }
+    for i in 0..6 {
+        x4[i] = state[i] + dt * k3[i];
+    }
     let k4 = deriv(&x4);
 
     for i in 0..6 {
@@ -87,21 +90,27 @@ pub fn step_orbit(sat: &mut Satellite, dt: f64, env: &SimEnvironment, sun_vector
 
 // 2. step_attitude: Propagates the spacecraft attitude dynamics using quaternion kinematic integration
 // and Euler's equations of rotational motion with reaction wheels, magnetorquers, and disturbances.
-pub fn step_attitude(sat: &mut Satellite, dt: f64, b_eci: [f64; 3], torque_rw_cmd: [f64; 3], dipole_mtq_cmd: [f64; 3]) {
+pub fn step_attitude(
+    sat: &mut Satellite,
+    dt: f64,
+    b_eci: [f64; 3],
+    torque_rw_cmd: [f64; 3],
+    dipole_mtq_cmd: [f64; 3],
+) {
     // 1. Euler dynamics: I * domega/dt + omega x (I * omega) = tau_rw + tau_mtq + tau_dist
     let i_x = sat.inertia[0];
     let i_y = sat.inertia[1];
     let i_z = sat.inertia[2];
-    
+
     // Magnetic field in body frame: B_body = R(q) * B_eci
     let b_body = rotate_vector_q(sat.q, b_eci);
-    
+
     // Torque from magnetorquer: tau_mtq = m x B
     let tau_mtq = cross(dipole_mtq_cmd, b_body);
-    
+
     // Torque from reaction wheels (action/reaction on spacecraft body)
-    let tau_rw = torque_rw_cmd; 
-    
+    let tau_rw = torque_rw_cmd;
+
     // Environmental disturbances (gravity gradient mockup as basic test dist)
     // ponytail: disturbance torque is simplified to constant bias + small white noise mockup
     let tau_dist = [1e-6, -1e-6, 5e-7];
@@ -138,10 +147,10 @@ pub fn step_attitude(sat: &mut Satellite, dt: f64, b_eci: [f64; 3], torque_rw_cm
     let q = sat.q;
     let w = sat.omega;
     let dq = [
-        -0.5 * (q[1]*w[0] + q[2]*w[1] + q[3]*w[2]),
-         0.5 * (q[0]*w[0] + q[2]*w[2] - q[3]*w[1]),
-         0.5 * (q[0]*w[1] - q[1]*w[2] + q[3]*w[0]),
-         0.5 * (q[0]*w[2] + q[1]*w[1] - q[2]*w[0]),
+        -0.5 * (q[1] * w[0] + q[2] * w[1] + q[3] * w[2]),
+        0.5 * (q[0] * w[0] + q[2] * w[2] - q[3] * w[1]),
+        0.5 * (q[0] * w[1] - q[1] * w[2] + q[3] * w[0]),
+        0.5 * (q[0] * w[2] + q[1] * w[1] - q[2] * w[0]),
     ];
 
     let new_q = [
@@ -159,10 +168,10 @@ pub fn step_atmosphere(gs: &mut GroundStation, model: &mut AtmosphereModel) {
     let r = model.lcg.next_f64();
     let current_state = gs.atmos_state;
     let row = &model.transition_matrix[current_state];
-    
+
     let mut cumulative = 0.0;
     let mut next_state = current_state;
-    
+
     for (idx, &prob) in row.iter().enumerate() {
         cumulative += prob;
         if r < cumulative {
@@ -170,7 +179,7 @@ pub fn step_atmosphere(gs: &mut GroundStation, model: &mut AtmosphereModel) {
             break;
         }
     }
-    
+
     gs.atmos_state = next_state;
     gs.k_value = model.k_values[next_state] / 1000.0; // Convert 1/km to 1/m
 }

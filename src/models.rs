@@ -83,4 +83,3 @@ pub struct SimEnvironment {
     pub scale_height_km: f64,
     pub p_srp: f64,
 }
-
