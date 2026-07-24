@@ -145,3 +145,27 @@ pub fn az_el_dist(obs_r: [f64; 3], obs_lat: f64, obs_lon: f64, tgt_r: [f64; 3]) 
 
 // Simple hand-rolled TOML config loader to keep the application dependency-free
 // ponytail: custom config loader that avoids external crate compilation and downloads.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_zero_vector() {
+        let zero = [0.0, 0.0, 0.0];
+        let normalized = normalize(zero);
+        assert_eq!(normalized, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_normalize_valid_vector() {
+        let vec = [3.0, 4.0, 0.0];
+        let normalized = normalize(vec);
+        // Norm is sqrt(3^2 + 4^2) = 5.0
+        // Expected: [3/5, 4/5, 0] = [0.6, 0.8, 0.0]
+        let expected = [0.6, 0.8, 0.0];
+        for i in 0..3 {
+            assert!((normalized[i] - expected[i]).abs() < 1e-12, "At index {}: expected {}, got {}", i, expected[i], normalized[i]);
+        }
+    }
+}
